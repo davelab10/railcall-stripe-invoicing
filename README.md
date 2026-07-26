@@ -11,7 +11,7 @@ approval: `customer_create`, `invoice_create`, `invoice_send`, `invoice_void`,
 `subscription_cancel`.
 
 Every write that commits money carries a Stripe `Idempotency-Key` derived from
-the approved payload hash. One approval is at most one effect — a retry after a
+the approved payload hash. One approval is at most one effect; a retry after a
 dropped connection returns the original result instead of billing twice.
 
 ## Who it is for
@@ -27,12 +27,12 @@ frictionless; anything that reaches a customer's inbox waits for your click.
 railcall market install dave/stripe-invoicing
 ```
 
-Restart Studio. Startup logs `[modules] loaded=2` with the nine commands.
+Restart Studio. The startup log lists the nine `stripe.billing.*` commands.
 
 ## Credentials
 
-One Stripe secret key, held locally and sent only as an `Authorization` header —
-never in a request body, a payload hash, or a receipt.
+One Stripe secret key, held locally and sent only as an `Authorization` header.
+It never enters a request body, a payload hash, or a receipt.
 
 **Save it under the legacy `STRIPE_SECRET_KEY` field** in Studio → Integrations →
 the stripe card. The newer "Add credential" button writes to a different store
@@ -48,8 +48,8 @@ Draft a two-line invoice, then send it. Both steps require approval.
 `stripe.billing.invoice_create`:
 
 ```json
-{"customer_id": "cus_UxMQ9Kr4nLp3kE",
- "line_items": [{"description": "Analytics retainer — July 2026", "amount_cents": 250000},
+{"customer_id": "cus_UxNR6KD8FF6XIm",
+ "line_items": [{"description": "Analytics retainer for July 2026", "amount_cents": 250000},
                 {"description": "Dashboard build (8 hrs)", "amount_cents": 96000, "quantity": 8}],
  "days_until_due": 14}
 ```
@@ -58,7 +58,7 @@ Actual output:
 
 ```json
 {"ok": true, "http_status": 200,
- "invoice_id": "in_1TxRhuIiIXjQdConWrm1pKv7", "status_at_stripe": "draft",
+ "invoice_id": "in_1TxSgNIiIXjQdConwgfB8dC7", "status_at_stripe": "draft",
  "amount_due": "10180.00 USD", "line_item_count": 2,
  "note": "draft only, nothing emailed. Run invoice_send to finalize and deliver."}
 ```
@@ -66,8 +66,8 @@ Actual output:
 Then `stripe.billing.invoice_send` with that `invoice_id`:
 
 ```json
-{"ok": true, "http_status": 200, "invoice_id": "in_1TxRhuIiIXjQdConWrm1pKv7",
- "number": "3I7BVVG1-0001", "status_at_stripe": "open",
+{"ok": true, "http_status": 200, "invoice_id": "in_1TxSgNIiIXjQdConwgfB8dC7",
+ "number": "R9GQW5TM-0001", "status_at_stripe": "open",
  "amount_due": "10180.00 USD", "was_before_send": "draft"}
 ```
 
@@ -82,7 +82,7 @@ Each run leaves an Ed25519-signed receipt carrying the approved payload hash.
 - **No refunds.** The built-in `stripe.create_refund` already covers that.
 - **Void is only for open invoices.** Drafts are deleted, paid invoices refunded.
 - **One currency per invoice**, defaulting to USD.
-- **Subscriptions are cancel-only** — no creating or repricing plans.
+- **Subscriptions are cancel-only.** No creating or repricing plans.
 - **`at_period_end` declares no type** in the manifest, because Studio's input
   validator recognises only string, number, array and object. The handler itself
   rejects anything that is not `true` or `false`.
