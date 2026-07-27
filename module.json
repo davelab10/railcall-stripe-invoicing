@@ -10,7 +10,7 @@
     "secret_field": "STRIPE_SECRET_KEY",
     "docs": "https://dashboard.stripe.com/apikeys"
   },
-  "description": "Governed Stripe accounts receivable, eighteen commands under stripe.billing.*. Covers the full cycle: find or create a customer, bill_client chains find-or-create plus draft plus send behind one approval, aging_report buckets every open invoice by days overdue, customer_summary rolls up profile plus invoices plus subscriptions plus lifetime paid in one call, credit_note_create and refund_create close out invoices two different ways depending on whether the money already moved, plus coupons and promotion codes for collections work that needs an incentive. Eight commands run without approval, ten go through the airlock. Every money-moving call carries a Stripe Idempotency-Key derived from the airlock payload hash, so an approved action can never fire twice; a missing idempotency helper is a hard error, not a silent fallback. Auth is a single Stripe secret key held in the local vault, declared in a top-level auth block. Works with sk_test_ keys end to end. contest:2026Q3",
+  "description": "Governed Stripe accounts receivable. Twenty-five commands under stripe.billing.*, built for the solo consultant or small agency that runs billing from an assistant and does not want a model deciding on its own to email a five-figure invoice. Twelve read freely, thirteen stop at the airlock for approval.\n\nBILLING\nbill_client {\"email\":\"ada@acme.com\",\"description\":\"July retainer\",\"amount_cents\":250000} finds or creates the customer, drafts, finalizes and sends. Four Stripe calls, one approval.\ninvoice_create {\"customer_id\":\"cus_X\",\"line_items\":[{\"description\":\"Design\",\"amount_cents\":96000}]} drafts an invoice. Nothing is emailed.\ninvoice_send {\"invoice_id\":\"in_X\"} finalizes and delivers, refusing paid or void invoices.\ninvoice_void {\"invoice_id\":\"in_X\"} voids an open invoice.\ninvoice_get {\"invoice_id\":\"in_X\"} and invoice_list {\"status\":\"open\"} read one or many, with outstanding totals rolled up.\n\nCOLLECTIONS\naging_report {} buckets every open invoice 0-30, 31-60, 61-90 and 90+ days overdue.\ncredit_note_create {\"invoice_id\":\"in_X\",\"amount_cents\":5000} reduces an open invoice; a paid one routes to refund_create.\nrefund_create {\"charge_id\":\"ch_X\"} refunds, in the same structured shape as every other command.\n\nCUSTOMERS\ncustomer_summary {\"customer_id\":\"cus_X\"} returns profile, invoices, subscriptions and lifetime paid in one call instead of three.\ncustomer_find {\"email\":\"ada@acme.com\"} and customer_create {\"email\":\"ada@acme.com\",\"name\":\"Ada\"} do the obvious things.\npayment_method_list {\"customer_id\":\"cus_X\"} lists cards by brand and last four, never full numbers.\n\nSUBSCRIPTIONS\nsubscription_list {\"customer_id\":\"cus_X\"} and subscription_cancel {\"subscription_id\":\"sub_X\",\"at_period_end\":true}, defaulting to period end.\n\nINCENTIVES\ncoupon_create {\"percent_off\":15,\"duration\":\"once\"}, coupon_list {}, and promotion_code_create {\"coupon_id\":\"acALYzHV\",\"code\":\"PAYNOW15\"}.\n\nCATALOG AND USAGE\nproduct_create {\"name\":\"API access\"} and product_list {} define what you sell. price_create {\"product_id\":\"prod_X\",\"unit_amount_cents\":1500} makes a one-time price by default; add interval for recurring, or meter_id plus interval for usage-based. price_list {} reads them back. usage_record_create {\"meter_id\":\"mtr_X\",\"customer_id\":\"cus_X\",\"value\":42} logs consumption via Stripe's Billing Meters API. usage_summary_list {\"meter_id\":\"mtr_X\",\"customer_id\":\"cus_X\"} reads it back, roughly 30 seconds after aggregation.\n\nAUTHORIZATION\nmandate_get {\"mandate_id\":\"mandate_X\"} retrieves a customer's standing authorization for future debits, never created directly, only a side effect of a SEPA or ACH setup flow.\n\nTRUST\nEvery money-moving call carries a Stripe Idempotency-Key derived from the airlock payload hash: one approval is at most one write. A missing idempotency helper is a hard error, never a silent fallback.\n\nSETUP\nOne Stripe secret key in the local vault under STRIPE_SECRET_KEY, never in a request body, payload hash, or receipt. sk_test_ keys work end to end.\n\ncontest:2026Q3",
   "license_required": false,
   "commands": [
     {
@@ -20,12 +20,20 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "email": {"type": "string", "required": true},
-        "limit": {"type": "number", "required": false}
+        "email": {
+          "type": "string",
+          "required": true
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
         "found": "number",
@@ -40,13 +48,24 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "customer_id": {"type": "string", "required": false},
-        "status": {"type": "string", "required": false},
-        "limit": {"type": "number", "required": false}
+        "customer_id": {
+          "type": "string",
+          "required": false
+        },
+        "status": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
         "found": "number",
@@ -62,11 +81,16 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "invoice_id": {"type": "string", "required": true}
+        "invoice_id": {
+          "type": "string",
+          "required": true
+        }
       },
       "output_schema": {
         "invoice_id": "string",
@@ -83,13 +107,24 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "customer_id": {"type": "string", "required": true},
-        "status": {"type": "string", "required": false},
-        "limit": {"type": "number", "required": false}
+        "customer_id": {
+          "type": "string",
+          "required": true
+        },
+        "status": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
         "found": "number",
@@ -104,14 +139,28 @@
       "risk": "medium",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "email": {"type": "string", "required": true},
-        "name": {"type": "string", "required": false},
-        "description": {"type": "string", "required": false},
-        "phone": {"type": "string", "required": false}
+        "email": {
+          "type": "string",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": false
+        },
+        "description": {
+          "type": "string",
+          "required": false
+        },
+        "phone": {
+          "type": "string",
+          "required": false
+        }
       },
       "output_schema": {
         "customer_id": "string",
@@ -127,15 +176,32 @@
       "risk": "medium",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "customer_id": {"type": "string", "required": true},
-        "line_items": {"type": "array", "required": true},
-        "currency": {"type": "string", "required": false},
-        "days_until_due": {"type": "number", "required": false},
-        "description": {"type": "string", "required": false}
+        "customer_id": {
+          "type": "string",
+          "required": true
+        },
+        "line_items": {
+          "type": "array",
+          "required": true
+        },
+        "currency": {
+          "type": "string",
+          "required": false
+        },
+        "days_until_due": {
+          "type": "number",
+          "required": false
+        },
+        "description": {
+          "type": "string",
+          "required": false
+        }
       },
       "output_schema": {
         "invoice_id": "string",
@@ -153,11 +219,16 @@
       "risk": "high",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "invoice_id": {"type": "string", "required": true}
+        "invoice_id": {
+          "type": "string",
+          "required": true
+        }
       },
       "output_schema": {
         "invoice_id": "string",
@@ -175,11 +246,16 @@
       "risk": "high",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "invoice_id": {"type": "string", "required": true}
+        "invoice_id": {
+          "type": "string",
+          "required": true
+        }
       },
       "output_schema": {
         "invoice_id": "string",
@@ -195,12 +271,19 @@
       "risk": "high",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "subscription_id": {"type": "string", "required": true},
-        "at_period_end": {"required": false}
+        "subscription_id": {
+          "type": "string",
+          "required": true
+        },
+        "at_period_end": {
+          "required": false
+        }
       },
       "output_schema": {
         "subscription_id": "string",
@@ -217,17 +300,28 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "customer_id": {"type": "string", "required": true}
+        "customer_id": {
+          "type": "string",
+          "required": true
+        }
       },
       "output_schema": {
-        "customer_id": "string", "email": "string", "name": "string", "delinquent": "boolean",
-        "open_invoice_count": "number", "total_outstanding": "string",
-        "active_subscription_count": "number", "lifetime_paid": "string",
-        "lifetime_paid_note": "string", "http_status": "number"
+        "customer_id": "string",
+        "email": "string",
+        "name": "string",
+        "delinquent": "boolean",
+        "open_invoice_count": "number",
+        "total_outstanding": "string",
+        "active_subscription_count": "number",
+        "lifetime_paid": "string",
+        "lifetime_paid_note": "string",
+        "http_status": "number"
       }
     },
     {
@@ -237,15 +331,26 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "customer_id": {"type": "string", "required": false},
-        "limit": {"type": "number", "required": false}
+        "customer_id": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
-        "found": "number", "total_outstanding": "string", "buckets": "object", "http_status": "number"
+        "found": "number",
+        "total_outstanding": "string",
+        "buckets": "object",
+        "http_status": "number"
       }
     },
     {
@@ -255,21 +360,47 @@
       "risk": "high",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "email": {"type": "string", "required": true},
-        "description": {"type": "string", "required": true},
-        "amount_cents": {"type": "number", "required": true},
-        "name": {"type": "string", "required": false},
-        "currency": {"type": "string", "required": false},
-        "days_until_due": {"type": "number", "required": false}
+        "email": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "required": true
+        },
+        "amount_cents": {
+          "type": "number",
+          "required": true
+        },
+        "name": {
+          "type": "string",
+          "required": false
+        },
+        "currency": {
+          "type": "string",
+          "required": false
+        },
+        "days_until_due": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
-        "customer_id": "string", "customer_created": "boolean", "invoice_id": "string",
-        "status_at_stripe": "string", "amount_due": "string", "sent_to": "string",
-        "hosted_invoice_url": "string", "dashboard_url": "string", "http_status": "number"
+        "customer_id": "string",
+        "customer_created": "boolean",
+        "invoice_id": "string",
+        "status_at_stripe": "string",
+        "amount_due": "string",
+        "sent_to": "string",
+        "hosted_invoice_url": "string",
+        "dashboard_url": "string",
+        "http_status": "number"
       }
     },
     {
@@ -279,18 +410,35 @@
       "risk": "high",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "invoice_id": {"type": "string", "required": true},
-        "amount_cents": {"type": "number", "required": true},
-        "reason": {"type": "string", "required": false},
-        "description": {"type": "string", "required": false}
+        "invoice_id": {
+          "type": "string",
+          "required": true
+        },
+        "amount_cents": {
+          "type": "number",
+          "required": true
+        },
+        "reason": {
+          "type": "string",
+          "required": false
+        },
+        "description": {
+          "type": "string",
+          "required": false
+        }
       },
       "output_schema": {
-        "credit_note_id": "string", "invoice_id": "string", "status_at_stripe": "string",
-        "amount_credited": "string", "http_status": "number"
+        "credit_note_id": "string",
+        "invoice_id": "string",
+        "status_at_stripe": "string",
+        "amount_credited": "string",
+        "http_status": "number"
       }
     },
     {
@@ -300,17 +448,31 @@
       "risk": "high",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "charge_id": {"type": "string", "required": true},
-        "amount_cents": {"type": "number", "required": false},
-        "reason": {"type": "string", "required": false}
+        "charge_id": {
+          "type": "string",
+          "required": true
+        },
+        "amount_cents": {
+          "type": "number",
+          "required": false
+        },
+        "reason": {
+          "type": "string",
+          "required": false
+        }
       },
       "output_schema": {
-        "refund_id": "string", "charge_id": "string", "status_at_stripe": "string",
-        "amount_refunded": "string", "http_status": "number"
+        "refund_id": "string",
+        "charge_id": "string",
+        "status_at_stripe": "string",
+        "amount_refunded": "string",
+        "http_status": "number"
       }
     },
     {
@@ -320,15 +482,26 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "customer_id": {"type": "string", "required": true},
-        "type": {"type": "string", "required": false}
+        "customer_id": {
+          "type": "string",
+          "required": true
+        },
+        "type": {
+          "type": "string",
+          "required": false
+        }
       },
       "output_schema": {
-        "found": "number", "payment_methods": "array", "type_queried": "string", "http_status": "number"
+        "found": "number",
+        "payment_methods": "array",
+        "type_queried": "string",
+        "http_status": "number"
       }
     },
     {
@@ -338,14 +511,21 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "limit": {"type": "number", "required": false}
+        "limit": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
-        "found": "number", "coupons": "array", "http_status": "number"
+        "found": "number",
+        "coupons": "array",
+        "http_status": "number"
       }
     },
     {
@@ -355,20 +535,44 @@
       "risk": "medium",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "percent_off": {"type": "number", "required": false},
-        "amount_cents_off": {"type": "number", "required": false},
-        "currency": {"type": "string", "required": false},
-        "duration": {"type": "string", "required": false},
-        "duration_in_months": {"type": "number", "required": false},
-        "name": {"type": "string", "required": false}
+        "percent_off": {
+          "type": "number",
+          "required": false
+        },
+        "amount_cents_off": {
+          "type": "number",
+          "required": false
+        },
+        "currency": {
+          "type": "string",
+          "required": false
+        },
+        "duration": {
+          "type": "string",
+          "required": false
+        },
+        "duration_in_months": {
+          "type": "number",
+          "required": false
+        },
+        "name": {
+          "type": "string",
+          "required": false
+        }
       },
       "output_schema": {
-        "coupon_id": "string", "name": "string", "percent_off": "number",
-        "amount_off": "string", "duration": "string", "http_status": "number"
+        "coupon_id": "string",
+        "name": "string",
+        "percent_off": "number",
+        "amount_off": "string",
+        "duration": "string",
+        "http_status": "number"
       }
     },
     {
@@ -378,17 +582,31 @@
       "risk": "medium",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "coupon_id": {"type": "string", "required": true},
-        "code": {"type": "string", "required": false},
-        "max_redemptions": {"type": "number", "required": false}
+        "coupon_id": {
+          "type": "string",
+          "required": true
+        },
+        "code": {
+          "type": "string",
+          "required": false
+        },
+        "max_redemptions": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
-        "promotion_code_id": "string", "code": "string", "coupon_id": "string",
-        "active": "boolean", "http_status": "number"
+        "promotion_code_id": "string",
+        "code": "string",
+        "coupon_id": "string",
+        "active": "boolean",
+        "http_status": "number"
       }
     },
     {
@@ -398,15 +616,26 @@
       "risk": "medium",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "name": {"type": "string", "required": true},
-        "description": {"type": "string", "required": false}
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "description": {
+          "type": "string",
+          "required": false
+        }
       },
       "output_schema": {
-        "product_id": "string", "name": "string", "active": "boolean", "http_status": "number"
+        "product_id": "string",
+        "name": "string",
+        "active": "boolean",
+        "http_status": "number"
       }
     },
     {
@@ -416,14 +645,21 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "limit": {"type": "number", "required": false}
+        "limit": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
-        "found": "number", "products": "array", "http_status": "number"
+        "found": "number",
+        "products": "array",
+        "http_status": "number"
       }
     },
     {
@@ -433,19 +669,41 @@
       "risk": "medium",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "product_id": {"type": "string", "required": true},
-        "unit_amount_cents": {"type": "number", "required": true},
-        "currency": {"type": "string", "required": false},
-        "interval": {"type": "string", "required": false},
-        "meter_id": {"type": "string", "required": false}
+        "product_id": {
+          "type": "string",
+          "required": true
+        },
+        "unit_amount_cents": {
+          "type": "number",
+          "required": true
+        },
+        "currency": {
+          "type": "string",
+          "required": false
+        },
+        "interval": {
+          "type": "string",
+          "required": false
+        },
+        "meter_id": {
+          "type": "string",
+          "required": false
+        }
       },
       "output_schema": {
-        "price_id": "string", "product_id": "string", "type": "string",
-        "unit_amount": "string", "interval": "string", "metered": "boolean", "http_status": "number"
+        "price_id": "string",
+        "product_id": "string",
+        "type": "string",
+        "unit_amount": "string",
+        "interval": "string",
+        "metered": "boolean",
+        "http_status": "number"
       }
     },
     {
@@ -455,15 +713,25 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "product_id": {"type": "string", "required": false},
-        "limit": {"type": "number", "required": false}
+        "product_id": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
-        "found": "number", "prices": "array", "http_status": "number"
+        "found": "number",
+        "prices": "array",
+        "http_status": "number"
       }
     },
     {
@@ -473,17 +741,32 @@
       "risk": "medium",
       "mode": "write_requires_approval",
       "side_effects": "external",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": true,
       "receipt_required": true,
       "input_schema": {
-        "meter_id": {"type": "string", "required": true},
-        "customer_id": {"type": "string", "required": true},
-        "value": {"type": "number", "required": true}
+        "meter_id": {
+          "type": "string",
+          "required": true
+        },
+        "customer_id": {
+          "type": "string",
+          "required": true
+        },
+        "value": {
+          "type": "number",
+          "required": true
+        }
       },
       "output_schema": {
-        "event_id": "string", "meter_id": "string", "customer_id": "string",
-        "value": "number", "note": "string", "http_status": "number"
+        "event_id": "string",
+        "meter_id": "string",
+        "customer_id": "string",
+        "value": "number",
+        "note": "string",
+        "http_status": "number"
       }
     },
     {
@@ -493,17 +776,34 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "meter_id": {"type": "string", "required": true},
-        "customer_id": {"type": "string", "required": true},
-        "start_time": {"type": "number", "required": false},
-        "end_time": {"type": "number", "required": false}
+        "meter_id": {
+          "type": "string",
+          "required": true
+        },
+        "customer_id": {
+          "type": "string",
+          "required": true
+        },
+        "start_time": {
+          "type": "number",
+          "required": false
+        },
+        "end_time": {
+          "type": "number",
+          "required": false
+        }
       },
       "output_schema": {
-        "found": "number", "summaries": "array", "note": "string", "http_status": "number"
+        "found": "number",
+        "summaries": "array",
+        "note": "string",
+        "http_status": "number"
       }
     },
     {
@@ -513,16 +813,25 @@
       "risk": "low",
       "mode": "read",
       "side_effects": "none",
-      "requires": ["STRIPE_SECRET_KEY"],
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
       "preview": false,
       "receipt_required": true,
       "input_schema": {
-        "mandate_id": {"type": "string", "required": true}
+        "mandate_id": {
+          "type": "string",
+          "required": true
+        }
       },
       "output_schema": {
-        "mandate_id": "string", "status_at_stripe": "string", "type": "string",
-        "payment_method_id": "string", "acceptance_type": "string",
-        "accepted_at": "number", "http_status": "number"
+        "mandate_id": "string",
+        "status_at_stripe": "string",
+        "type": "string",
+        "payment_method_id": "string",
+        "acceptance_type": "string",
+        "accepted_at": "number",
+        "http_status": "number"
       }
     }
   ]
