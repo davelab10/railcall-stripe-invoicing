@@ -1,4 +1,4 @@
-"""dave/stripe-invoicing v1.1.1 - governed Stripe invoicing.
+"""dave/stripe-invoicing v1.2.0 - governed Stripe invoicing.
 
 Vault entry `stripe` in keys.local.json:
     { "STRIPE_SECRET_KEY": "sk_test_..." }
@@ -1099,4 +1099,245 @@ def stripe_billing_promotion_code_create(inputs, stamp):
         "code": parsed.get("code") or "",
         "coupon_id": coupon_id,
         "active": bool(parsed.get("active")),
+    }, None
+
+
+# ------------------------------------------------------------- v1.2 additions
+
+def stripe_billing_product_create(inputs, stamp):
+    """Create a product. Foundation for price_create."""
+    name = _need_str(inputs, "name")
+    form = {"name": name}
+    description = inputs.get("description")
+    if isinstance(description, str) and description.strip():
+        form["description"] = description.strip()
+
+    status, parsed = _call(
+        "POST", "/products", form,
+        idem_for="stripe.billing.product_create", inputs=inputs, stamp=stamp,
+    )
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "product_id": parsed.get("id") or "",
+        "name": parsed.get("name") or "",
+        "active": bool(parsed.get("active")),
+    }, None
+
+
+def stripe_billing_product_list(inputs, stamp):
+    status, parsed = _call("GET", "/products", {"limit": _clamp_limit(inputs)})
+    rows = parsed.get("data") or []
+    products = [
+        {"product_id": row.get("id"), "name": row.get("name") or "", "active": bool(row.get("active"))}
+        for row in rows
+    ]
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "found": len(products),
+        "products": products,
+    }, None
+
+
+def stripe_billing_price_create(inputs, stamp):
+    """Create a price: one-time, recurring, or metered.
+
+    No `interval` -> one-time. `interval` alone -> standard recurring.
+    `meter_id` -> metered, and Stripe requires interval alongside it, since a
+    metered price is always billed on a schedule even though the quantity
+    comes from usage rather than a flat unit count.
+    """
+    product_id = _need_str(inputs, "product_id", "run product_create or product_list to get one")
+    try:
+        amount = int(inputs.get("unit_amount_cents"))
+    except Exception:
+        raise RuntimeError("unit_amount_cents must be a whole number of cents")
+    if amount <= 0:
+        raise RuntimeError("unit_amount_cents must be greater than zero")
+    currency = str(inputs.get("currency") or "usd").strip().lower()
+
+    interval = inputs.get("interval")
+    if isinstance(interval, str) and interval.strip():
+        interval = interval.strip().lower()
+        if interval not in ("day", "week", "month", "year"):
+            raise RuntimeError("interval must be one of: day, week, month, year")
+    else:
+        interval = None
+
+    meter_id = inputs.get("meter_id")
+    if isinstance(meter_id, str) and meter_id.strip():
+        meter_id = meter_id.strip()
+        if not interval:
+            raise RuntimeError("meter_id requires interval too: a metered price is still billed on a schedule")
+    else:
+        meter_id = None
+
+    form = {"product": product_id, "currency": currency, "unit_amount": str(amount)}
+    if meter_id:
+        form["recurring[usage_type]"] = "metered"
+        form["recurring[meter]"] = meter_id
+        form["recurring[interval]"] = interval
+    elif interval:
+        form["recurring[interval]"] = interval
+
+    status, parsed = _call(
+        "POST", "/prices", form,
+        idem_for="stripe.billing.price_create", inputs=inputs, stamp=stamp,
+    )
+    recurring = parsed.get("recurring") or {}
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "price_id": parsed.get("id") or "",
+        "product_id": parsed.get("product") or product_id,
+        "type": parsed.get("type"),
+        "unit_amount": _money(parsed.get("unit_amount") or amount, parsed.get("currency") or currency),
+        "interval": recurring.get("interval") or "",
+        "metered": bool(recurring.get("meter")),
+    }, None
+
+
+def stripe_billing_price_list(inputs, stamp):
+    form = {"limit": _clamp_limit(inputs)}
+    product_id = inputs.get("product_id")
+    if isinstance(product_id, str) and product_id.strip():
+        form["product"] = product_id.strip()
+
+    status, parsed = _call("GET", "/prices", form)
+    rows = parsed.get("data") or []
+    prices = []
+    for row in rows:
+        recurring = row.get("recurring") or {}
+        prices.append({
+            "price_id": row.get("id"),
+            "product_id": row.get("product"),
+            "type": row.get("type"),
+            "unit_amount": _money(row.get("unit_amount") or 0, row.get("currency") or "usd"),
+            "interval": recurring.get("interval") or "",
+            "metered": bool(recurring.get("meter")),
+        })
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "found": len(prices),
+        "prices": prices,
+    }, None
+
+
+def stripe_billing_usage_record_create(inputs, stamp):
+    """Record usage against a metered price via a Billing Meter event.
+
+    Stripe has two coexisting APIs for this: the legacy per-subscription-item
+    usage_records endpoint, and the newer Billing Meters event API. This
+    module uses Billing Meters, the path Stripe steers new integrations
+    toward, confirmed live rather than assumed.
+
+    Takes meter_id rather than the meter's event_name, and looks the
+    event_name up, so the operator only ever has to know the meter id they
+    already have from price_create.
+    """
+    meter_id = _need_str(inputs, "meter_id", "the meter id used when the metered price was created")
+    customer_id = _need_str(inputs, "customer_id", "Stripe customer ids start with cus_")
+
+    raw_value = inputs.get("value")
+    if raw_value is None:
+        raise RuntimeError("value is required, and may be 0 to record zero usage")
+    try:
+        value = float(raw_value)
+    except Exception:
+        raise RuntimeError("value must be a number")
+    if value < 0:
+        raise RuntimeError("value cannot be negative")
+
+    _, meter = _call("GET", "/billing/meters/" + meter_id)
+    event_name = meter.get("event_name")
+    if not event_name:
+        raise RuntimeError("Stripe has no such meter: " + meter_id)
+
+    form = {
+        "event_name": event_name,
+        "payload[stripe_customer_id]": customer_id,
+        "payload[value]": str(value),
+    }
+    status, parsed = _call(
+        "POST", "/billing/meter_events", form,
+        idem_for="stripe.billing.usage_record_create", inputs=inputs, stamp=stamp,
+    )
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "event_id": parsed.get("identifier") or "",
+        "meter_id": meter_id,
+        "customer_id": customer_id,
+        "value": value,
+        "note": "aggregation is asynchronous; usage_summary_list may take up to "
+                "about 30 seconds to reflect this event",
+    }, None
+
+
+def stripe_billing_usage_summary_list(inputs, stamp):
+    """Read aggregated usage for a meter and customer over a time window.
+
+    Verified live: a summary is not immediately available after
+    usage_record_create returns. Stripe aggregates asynchronously, roughly a
+    20 second lag observed in testing. An empty result right after recording
+    usage does not mean the event was lost.
+    """
+    meter_id = _need_str(inputs, "meter_id", "the meter id used when the metered price was created")
+    customer_id = _need_str(inputs, "customer_id", "Stripe customer ids start with cus_")
+
+    end_time = inputs.get("end_time")
+    start_time = inputs.get("start_time")
+    now = int(time.time())  # noqa: F821 -- pre-injected per the module loader
+    end_val = int(end_time) if end_time is not None else now
+    start_val = int(start_time) if start_time is not None else end_val - 86400
+
+    status, parsed = _call(
+        "GET", "/billing/meters/" + meter_id + "/event_summaries",
+        {"customer": customer_id, "start_time": start_val, "end_time": end_val},
+    )
+    rows = parsed.get("data") or []
+    summaries = [
+        {"start_time": row.get("start_time"), "end_time": row.get("end_time"),
+         "aggregated_value": row.get("aggregated_value")}
+        for row in rows
+    ]
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "found": len(summaries),
+        "summaries": summaries,
+        "note": "aggregation lags roughly 20-30 seconds behind usage_record_create",
+    }, None
+
+
+def stripe_billing_mandate_get(inputs, stamp):
+    """Retrieve a mandate. Mandates cannot be created directly through the
+    API, verified live (POST /v1/mandates does not exist) -- they only exist
+    as a side effect of confirming a SetupIntent or PaymentIntent with a
+    payment method type that needs future-debit authorization (SEPA, ACH,
+    BACS, etc). Listing mandates requires a Stripe preview API version, not
+    used here since it is unstable and inconsistent with the rest of this
+    module. Retrieval by id is the one stable, documented operation.
+    """
+    mandate_id = _need_str(inputs, "mandate_id", "Stripe mandate ids start with mandate_")
+    status, parsed = _call("GET", "/mandates/" + mandate_id)
+    acceptance = parsed.get("customer_acceptance") or {}
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "mandate_id": parsed.get("id") or mandate_id,
+        "status_at_stripe": parsed.get("status"),
+        "type": parsed.get("type"),
+        "payment_method_id": parsed.get("payment_method") or "",
+        "acceptance_type": acceptance.get("type") or "",
+        "accepted_at": acceptance.get("accepted_at"),
     }, None

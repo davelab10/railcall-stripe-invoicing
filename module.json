@@ -1,7 +1,7 @@
 {
   "id": "dave/stripe-invoicing",
   "name": "stripe-invoicing",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "publisher_pubkey": "1f8c4489a0c417d6cbd9ac9b091fbf3df54e09b8af26105686f41364d4a72902",
   "provider": "stripe",
   "auth": {
@@ -389,6 +389,140 @@
       "output_schema": {
         "promotion_code_id": "string", "code": "string", "coupon_id": "string",
         "active": "boolean", "http_status": "number"
+      }
+    },
+    {
+      "id": "stripe.billing.product_create",
+      "title": "Create a product",
+      "provider": "stripe",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "side_effects": "external",
+      "requires": ["STRIPE_SECRET_KEY"],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "name": {"type": "string", "required": true},
+        "description": {"type": "string", "required": false}
+      },
+      "output_schema": {
+        "product_id": "string", "name": "string", "active": "boolean", "http_status": "number"
+      }
+    },
+    {
+      "id": "stripe.billing.product_list",
+      "title": "List products",
+      "provider": "stripe",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": ["STRIPE_SECRET_KEY"],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "limit": {"type": "number", "required": false}
+      },
+      "output_schema": {
+        "found": "number", "products": "array", "http_status": "number"
+      }
+    },
+    {
+      "id": "stripe.billing.price_create",
+      "title": "Create a price: one-time, recurring, or metered",
+      "provider": "stripe",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "side_effects": "external",
+      "requires": ["STRIPE_SECRET_KEY"],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "product_id": {"type": "string", "required": true},
+        "unit_amount_cents": {"type": "number", "required": true},
+        "currency": {"type": "string", "required": false},
+        "interval": {"type": "string", "required": false},
+        "meter_id": {"type": "string", "required": false}
+      },
+      "output_schema": {
+        "price_id": "string", "product_id": "string", "type": "string",
+        "unit_amount": "string", "interval": "string", "metered": "boolean", "http_status": "number"
+      }
+    },
+    {
+      "id": "stripe.billing.price_list",
+      "title": "List prices",
+      "provider": "stripe",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": ["STRIPE_SECRET_KEY"],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "product_id": {"type": "string", "required": false},
+        "limit": {"type": "number", "required": false}
+      },
+      "output_schema": {
+        "found": "number", "prices": "array", "http_status": "number"
+      }
+    },
+    {
+      "id": "stripe.billing.usage_record_create",
+      "title": "Record usage against a metered price (Billing Meters)",
+      "provider": "stripe",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "side_effects": "external",
+      "requires": ["STRIPE_SECRET_KEY"],
+      "preview": true,
+      "receipt_required": true,
+      "input_schema": {
+        "meter_id": {"type": "string", "required": true},
+        "customer_id": {"type": "string", "required": true},
+        "value": {"type": "number", "required": true}
+      },
+      "output_schema": {
+        "event_id": "string", "meter_id": "string", "customer_id": "string",
+        "value": "number", "note": "string", "http_status": "number"
+      }
+    },
+    {
+      "id": "stripe.billing.usage_summary_list",
+      "title": "Read aggregated usage for a meter and customer (allow ~30s lag after recording)",
+      "provider": "stripe",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": ["STRIPE_SECRET_KEY"],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "meter_id": {"type": "string", "required": true},
+        "customer_id": {"type": "string", "required": true},
+        "start_time": {"type": "number", "required": false},
+        "end_time": {"type": "number", "required": false}
+      },
+      "output_schema": {
+        "found": "number", "summaries": "array", "note": "string", "http_status": "number"
+      }
+    },
+    {
+      "id": "stripe.billing.mandate_get",
+      "title": "Retrieve a mandate (read-only, mandates cannot be created via the API)",
+      "provider": "stripe",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": ["STRIPE_SECRET_KEY"],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "mandate_id": {"type": "string", "required": true}
+      },
+      "output_schema": {
+        "mandate_id": "string", "status_at_stripe": "string", "type": "string",
+        "payment_method_id": "string", "acceptance_type": "string",
+        "accepted_at": "number", "http_status": "number"
       }
     }
   ]
