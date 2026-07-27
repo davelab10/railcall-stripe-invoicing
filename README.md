@@ -4,22 +4,30 @@ Bill a client and collect, without handing an agent your Stripe account.
 
 ## What it does
 
-Nine commands covering the bill-and-collect cycle, split by blast radius. Four
-reads run freely: `customer_find`, `invoice_list`, `invoice_get`,
-`subscription_list`. Five writes stop at the airlock for explicit human
-approval: `customer_create`, `invoice_create`, `invoice_send`, `invoice_void`,
-`subscription_cancel`.
+Eighteen commands under `stripe.billing.*`, covering the full accounts
+receivable cycle. Eight reads run without approval: find a customer, list or
+retrieve invoices, list subscriptions, list payment methods, list coupons,
+plus two that save real digging. `aging_report` buckets every open invoice by
+days overdue. `customer_summary` rolls up profile, open invoices, active
+subscriptions, and lifetime paid into one call instead of three.
 
-Every write that commits money carries a Stripe `Idempotency-Key` derived from
-the approved payload hash. One approval is at most one effect; a retry after a
-dropped connection returns the original result instead of billing twice.
+Ten writes go through the airlock: create a customer, draft and send an
+invoice, void a mistake, cancel a subscription, issue a credit note or a
+refund, create coupons and promotion codes, and `bill_client`, which chains
+find-or-create-customer, draft, finalize, and send behind a single approval.
+The daily case is one command instead of four.
+
+Every write that commits money carries a Stripe `Idempotency-Key` derived
+from the approved payload hash. One approval is at most one effect. A missing
+idempotency helper is a hard error, not a silent fallback that would quietly
+drop double-charge protection on a retry.
 
 ## Who it is for
 
-The solo consultant or small agency who runs billing from an assistant. You
-want "draft July's invoice for Ada and send it" to work in one sentence, but you
-do not want a model deciding on its own to email a $10,000 invoice. Reads stay
-frictionless; anything that reaches a customer's inbox waits for your click.
+The solo consultant or small agency who runs billing from an assistant. "Bill
+Ada 1800 dollars for the August retainer" should be one sentence and one
+approval, not a model improvising four separate Stripe calls on its own
+judgment.
 
 ## Install
 
@@ -27,62 +35,53 @@ frictionless; anything that reaches a customer's inbox waits for your click.
 railcall market install dave/stripe-invoicing
 ```
 
-Restart Studio. The startup log lists the nine `stripe.billing.*` commands.
+Restart Studio. The startup log lists the eighteen `stripe.billing.*`
+commands.
 
 ## Credentials
 
-One Stripe secret key, held locally and sent only as an `Authorization` header.
-It never enters a request body, a payload hash, or a receipt.
+One Stripe secret key, held locally and sent only as an `Authorization`
+header. It never enters a request body, a payload hash, or a receipt.
 
-**Save it under the legacy `STRIPE_SECRET_KEY` field** in Studio → Integrations →
-the stripe card. The newer "Add credential" button writes to a different store
-that handlers cannot read, and the module will look broken if you use it. If the
-key is missing the module says so in those words rather than failing obscurely.
+**Save it under the legacy `STRIPE_SECRET_KEY` field** in Studio →
+Integrations → the stripe card. The newer "Add credential" button writes to a
+different store that handlers cannot read.
 
 `sk_test_` keys work end to end.
 
 ## Worked example
 
-Draft a two-line invoice, then send it. Both steps require approval.
-
-`stripe.billing.invoice_create`:
+`stripe.billing.bill_client`, one command, one approval:
 
 ```json
-{"customer_id": "cus_UxNR6KD8FF6XIm",
- "line_items": [{"description": "Analytics retainer for July 2026", "amount_cents": 250000},
-                {"description": "Dashboard build (8 hrs)", "amount_cents": 96000, "quantity": 8}],
- "days_until_due": 14}
+{"email": "bill-client-test-2707@example.com",
+ "description": "August retainer", "amount_cents": 180000}
 ```
 
 Actual output:
 
 ```json
-{"ok": true, "http_status": 200,
- "invoice_id": "in_1TxSgNIiIXjQdConwgfB8dC7", "status_at_stripe": "draft",
- "amount_due": "10180.00 USD", "line_item_count": 2,
- "note": "draft only, nothing emailed. Run invoice_send to finalize and deliver."}
+{"ok": true, "http_status": 200, "customer_id": "cus_Uxiyhn2Wgeyiaf",
+ "customer_created": true, "invoice_id": "in_1TxnWRIiIXjQdCon4iHziWlw",
+ "status_at_stripe": "open", "amount_due": "1800.00 USD"}
 ```
 
-Then `stripe.billing.invoice_send` with that `invoice_id`:
-
-```json
-{"ok": true, "http_status": 200, "invoice_id": "in_1TxSgNIiIXjQdConwgfB8dC7",
- "number": "R9GQW5TM-0001", "status_at_stripe": "open",
- "amount_due": "10180.00 USD", "was_before_send": "draft"}
-```
-
-Each run leaves an Ed25519-signed receipt carrying the approved payload hash.
+Four Stripe calls behind one signed receipt: the customer did not exist, so
+it was created, then invoiced, then sent.
 
 ## Known limitations
 
 - **Amounts are integer cents.** `250.00` is rejected; pass `25000`.
-- **Quantity is multiplied into the line total.** Stripe's `invoiceitems`
-  endpoint no longer accepts `unit_amount` with `quantity`, so `8 × $960` posts
-  as one $7,680 line reading `Dashboard build (8 hrs) (x8 @ 960.00 USD)`.
-- **No refunds.** The built-in `stripe.create_refund` already covers that.
-- **Void is only for open invoices.** Drafts are deleted, paid invoices refunded.
+- **`credit_note_create` only works on open invoices.** A paid invoice needs
+  `refund_create` instead: Stripe requires a matching refund amount to
+  balance a credit note against money that already moved.
+- **Void is only for open invoices.** Drafts are deleted, paid invoices
+  refunded.
 - **One currency per invoice**, defaulting to USD.
 - **Subscriptions are cancel-only.** No creating or repricing plans.
-- **`at_period_end` declares no type** in the manifest, because Studio's input
-  validator recognises only string, number, array and object. The handler itself
-  rejects anything that is not `true` or `false`.
+- **`payment_method_list` defaults to `type: card`.** Pass a different type
+  for anything else; Stripe's list endpoint returns nothing for a type not
+  explicitly asked for.
+- **`at_period_end` declares no type** in the manifest, because Studio's
+  input validator recognises only string, number, array and object. The
+  handler itself rejects anything that is not `true` or `false`.
