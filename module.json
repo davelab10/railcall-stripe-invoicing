@@ -1,7 +1,7 @@
 {
   "id": "dave/stripe-invoicing",
   "name": "stripe-invoicing",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "publisher_pubkey": "1f8c4489a0c417d6cbd9ac9b091fbf3df54e09b8af26105686f41364d4a72902",
   "provider": "stripe",
   "homepage": "https://davelab10.github.io/portofolio/",
