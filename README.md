@@ -2,6 +2,8 @@
 
 Bill and collect, without handing an agent your Stripe account.
 
+Demo video: https://youtu.be/Uk6ikZmFR1g
+
 ## What it does
 
 Twenty-five commands under `stripe.billing.*`, covering accounts receivable
