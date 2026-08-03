@@ -23,8 +23,18 @@ signed egress receipts per call:
 - `client_summary_insight` — synthesizes a plain-English account insight from
   customer_summary data.
 
-All three require a Groq API key in the vault:
-`keys.local.json: {"groq": {"GROQ_API_KEY": "gsk_..."}}`
+All three require an LLM API key in the vault. Supported providers:
+
+```
+# Groq (free tier available)
+keys.local.json: {"groq": {"GROQ_API_KEY": "gsk_..."}}
+
+# OpenAI
+keys.local.json: {"openai": {"OPENAI_API_KEY": "sk-..."}}
+
+# Anthropic
+railcall set anthropic-key sk-ant-...
+```
 
 Thirteen writes go through the airlock: create a customer, draft and send an
 invoice, void a mistake, cancel a subscription, issue a credit note or a
