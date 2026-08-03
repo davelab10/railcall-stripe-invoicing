@@ -1,7 +1,7 @@
 {
   "id": "dave/stripe-invoicing",
   "name": "stripe-invoicing",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "publisher_pubkey": "1f8c4489a0c417d6cbd9ac9b091fbf3df54e09b8af26105686f41364d4a72902",
   "provider": "stripe",
   "homepage": "https://davelab10.github.io/portofolio/",
@@ -831,6 +831,67 @@
         "accepted_at": "number",
         "http_status": "number"
       }
+    },
+    {
+      "id": "stripe.billing.invoice_description_generate",
+      "title": "Generate invoice line-item description (AI)",
+      "provider": "groq",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "GROQ_API_KEY"
+      ],
+      "input_schema": {
+        "service": "string",
+        "period": "string",
+        "client_name": "string",
+        "tone": "string"
+      }
+    },
+    {
+      "id": "stripe.billing.dunning_message_draft",
+      "title": "Draft dunning email for overdue invoice (AI)",
+      "provider": "groq",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "GROQ_API_KEY"
+      ],
+      "input_schema": {
+        "invoice_id": "string",
+        "customer_email": "string",
+        "amount_due": "string",
+        "days_overdue": "integer",
+        "tone": "string",
+        "sender_name": "string"
+      }
+    },
+    {
+      "id": "stripe.billing.client_summary_insight",
+      "title": "Generate plain-English account insight from customer data (AI)",
+      "provider": "groq",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "GROQ_API_KEY"
+      ],
+      "input_schema": {
+        "customer_id": "string",
+        "customer_email": "string",
+        "open_invoices_count": "integer",
+        "paid_invoices_count": "integer",
+        "lifetime_paid": "string",
+        "active_subscriptions_count": "integer",
+        "focus": "string"
+      }
+    }
+  ],
+  "allowed_destinations": [
+    {
+      "provider": "groq"
     }
   ]
 }

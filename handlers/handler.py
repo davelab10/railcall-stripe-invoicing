@@ -1341,3 +1341,225 @@ def stripe_billing_mandate_get(inputs, stamp):
         "acceptance_type": acceptance.get("type") or "",
         "accepted_at": acceptance.get("accepted_at"),
     }, None
+
+
+# ------------------------------------------------------------------ LLM helpers
+
+def _llm_complete(messages, module_id="dave/stripe-invoicing", module_version="v1.2.3"):
+    """Call station.llm.complete() with correct module attribution.
+
+    Falls back gracefully if station_llm is not available (e.g. station < v0.45).
+    Returns the reply string or raises RuntimeError with a clear message.
+    """
+    try:
+        import station_llm as _sl  # noqa: F401 -- injected by station ROOT path
+        result = _sl.complete(
+            messages,
+            provider="groq",
+            module_id=module_id,
+            module_version=module_version,
+            caller_kind="module",
+        )
+    except ImportError:
+        raise RuntimeError(
+            "station.llm is not available on this station version. "
+            "Update to station v0.45 or later to use AI commands."
+        )
+    error = result.get("error")
+    if error:
+        raise RuntimeError(f"LLM call failed: {error}")
+    reply = result.get("reply") or ""
+    if not reply:
+        raise RuntimeError("LLM returned an empty reply. Check your Groq API key in the vault.")
+    return reply, result.get("receipt_id", "")
+
+
+def stripe_billing_invoice_description_generate(inputs, stamp):
+    """Generate a professional invoice line-item description using an LLM.
+
+    Takes a short context (service name, period, client name) and returns
+    a polished, ready-to-use description string suitable for invoice_create
+    or bill_client. The LLM call is governed: a signed egress receipt is
+    written to the Receipts tab under kind=egress.
+
+    Requires a Groq API key stored in the vault:
+        keys.local.json: {"groq": {"GROQ_API_KEY": "gsk_..."}}
+
+    Returns:
+        description: the generated line-item description
+        receipt_id:  the egress receipt id (eg/...) for audit
+    """
+    service = _need_str(inputs, "service", "e.g. 'Monthly retainer', 'API integration work'")
+    period = str(inputs.get("period") or "").strip()
+    client = str(inputs.get("client_name") or "").strip()
+    tone = str(inputs.get("tone") or "professional").strip().lower()
+    if tone not in ("professional", "friendly", "brief"):
+        raise RuntimeError("tone must be one of: professional, friendly, brief")
+
+    context_parts = [f"Service: {service}"]
+    if period:
+        context_parts.append(f"Period: {period}")
+    if client:
+        context_parts.append(f"Client: {client}")
+
+    system_prompt = (
+        "You are a billing assistant. Generate a concise, professional invoice "
+        "line-item description. Output only the description text — no quotes, "
+        "no explanation, no prefix. Maximum 120 characters."
+    )
+    user_prompt = (
+        f"Generate a {tone} invoice line-item description for:\n"
+        + "\n".join(context_parts)
+    )
+
+    reply, receipt_id = _llm_complete([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ])
+
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "description": reply.strip(),
+        "receipt_id": receipt_id,
+        "note": "LLM call governed via station.llm — egress receipt written to audit log",
+    }, None
+
+
+def stripe_billing_dunning_message_draft(inputs, stamp):
+    """Draft a follow-up message for an overdue invoice using an LLM.
+
+    Takes invoice data (typically from invoice_get or aging_report) and
+    generates a ready-to-send dunning email. Tone is configurable. The
+    operator should review the draft before sending.
+
+    Requires a Groq API key stored in the vault:
+        keys.local.json: {"groq": {"GROQ_API_KEY": "gsk_..."}}
+
+    Returns:
+        subject:    suggested email subject line
+        body:       email body draft
+        receipt_id: egress receipt id for audit
+    """
+    invoice_id = _need_str(inputs, "invoice_id", "Stripe invoice ids start with in_")
+    customer_email = _need_str(inputs, "customer_email", "the customer's email address")
+    amount_due = str(inputs.get("amount_due") or "").strip()
+    days_overdue = inputs.get("days_overdue")
+    tone = str(inputs.get("tone") or "polite").strip().lower()
+    sender_name = str(inputs.get("sender_name") or "Billing Team").strip()
+
+    if tone not in ("polite", "firm", "urgent"):
+        raise RuntimeError("tone must be one of: polite, firm, urgent")
+    if days_overdue is not None:
+        try:
+            days_overdue = int(days_overdue)
+        except (ValueError, TypeError):
+            raise RuntimeError("days_overdue must be a whole number")
+
+    context_parts = [
+        f"Invoice ID: {invoice_id}",
+        f"Customer email: {customer_email}",
+    ]
+    if amount_due:
+        context_parts.append(f"Amount due: {amount_due}")
+    if days_overdue is not None:
+        context_parts.append(f"Days overdue: {days_overdue}")
+
+    system_prompt = (
+        "You are a billing assistant. Draft a dunning email for an overdue invoice. "
+        "Output a JSON object with two fields: 'subject' (the email subject line) "
+        "and 'body' (the email body). No markdown, no extra explanation. "
+        "Keep body under 200 words."
+    )
+    user_prompt = (
+        f"Draft a {tone} dunning email. Sender: {sender_name}.\n"
+        + "\n".join(context_parts)
+    )
+
+    reply, receipt_id = _llm_complete([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ])
+
+    # Try to parse JSON; fall back to treating the whole reply as body
+    subject = ""
+    body = reply.strip()
+    try:
+        parsed = _json.loads(reply)
+        if isinstance(parsed, dict):
+            subject = str(parsed.get("subject") or "").strip()
+            body = str(parsed.get("body") or "").strip()
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "subject": subject or f"Invoice {invoice_id} — payment reminder",
+        "body": body,
+        "receipt_id": receipt_id,
+        "note": "Draft only — review before sending. LLM call governed via station.llm.",
+    }, None
+
+
+def stripe_billing_client_summary_insight(inputs, stamp):
+    """Generate a plain-English account insight from customer summary data.
+
+    Takes the output of customer_summary (or equivalent fields) and produces
+    a concise paragraph suitable for account reviews, CRM notes, or client
+    communications. The LLM call is governed: a signed egress receipt is
+    written to the Receipts tab under kind=egress.
+
+    Requires a Groq API key stored in the vault:
+        keys.local.json: {"groq": {"GROQ_API_KEY": "gsk_..."}}
+
+    Returns:
+        insight:    plain-English summary paragraph
+        receipt_id: egress receipt id for audit
+    """
+    customer_id = _need_str(inputs, "customer_id", "Stripe customer ids start with cus_")
+    customer_email = str(inputs.get("customer_email") or "").strip()
+    open_invoices = inputs.get("open_invoices_count")
+    paid_invoices = inputs.get("paid_invoices_count")
+    lifetime_paid = str(inputs.get("lifetime_paid") or "").strip()
+    active_subscriptions = inputs.get("active_subscriptions_count")
+    focus = str(inputs.get("focus") or "general").strip().lower()
+
+    if focus not in ("general", "risk", "opportunity", "payment_health"):
+        raise RuntimeError("focus must be one of: general, risk, opportunity, payment_health")
+
+    context_parts = [f"Customer ID: {customer_id}"]
+    if customer_email:
+        context_parts.append(f"Email: {customer_email}")
+    if open_invoices is not None:
+        context_parts.append(f"Open invoices: {open_invoices}")
+    if paid_invoices is not None:
+        context_parts.append(f"Paid invoices: {paid_invoices}")
+    if lifetime_paid:
+        context_parts.append(f"Lifetime paid: {lifetime_paid}")
+    if active_subscriptions is not None:
+        context_parts.append(f"Active subscriptions: {active_subscriptions}")
+
+    system_prompt = (
+        "You are a billing analyst. Produce a concise 2-3 sentence account insight "
+        "from the data provided. Be factual and specific. No preamble. "
+        "Output only the insight paragraph."
+    )
+    user_prompt = (
+        f"Generate a {focus} account insight:\n"
+        + "\n".join(context_parts)
+    )
+
+    reply, receipt_id = _llm_complete([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ])
+
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "customer_id": customer_id,
+        "insight": reply.strip(),
+        "receipt_id": receipt_id,
+        "note": "LLM call governed via station.llm — egress receipt written to audit log",
+    }, None
