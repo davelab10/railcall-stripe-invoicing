@@ -6,12 +6,25 @@ Demo video: https://youtu.be/Uk6ikZmFR1g
 
 ## What it does
 
-Twenty-five commands under `stripe.billing.*`, covering accounts receivable
+Twenty-eight commands under `stripe.billing.*`, covering accounts receivable
 end to end. Twelve reads run without approval, covering customers, invoices,
 subscriptions, payment methods, coupons, products, prices, usage, and
 mandates. `aging_report` buckets every open invoice by days overdue.
 `customer_summary` rolls up profile, invoices, subscriptions, and lifetime
 paid into one call instead of three.
+
+Three AI commands (v1.2.3, station v0.45) generate governed LLM output with
+signed egress receipts per call:
+
+- `invoice_description_generate` — generates a professional line-item
+  description from service name, period, and client name.
+- `dunning_message_draft` — drafts a follow-up email for an overdue invoice.
+  Inputs: invoice_id, customer_email, days_overdue, tone.
+- `client_summary_insight` — synthesizes a plain-English account insight from
+  customer_summary data.
+
+All three require a Groq API key in the vault:
+`keys.local.json: {"groq": {"GROQ_API_KEY": "gsk_..."}}`
 
 Thirteen writes go through the airlock: create a customer, draft and send an
 invoice, void a mistake, cancel a subscription, issue a credit note or a
