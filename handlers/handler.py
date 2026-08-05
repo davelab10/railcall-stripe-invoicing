@@ -1,4 +1,4 @@
-"""dave/stripe-invoicing v1.2.0 - governed Stripe invoicing.
+"""dave/stripe-invoicing v1.2.5 - governed Stripe receivables.
 
 Vault entry `stripe` in keys.local.json:
     { "STRIPE_SECRET_KEY": "sk_test_..." }
@@ -7,12 +7,10 @@ The key never leaves this machine. It is read through vault_get at call time
 and injected as an Authorization header only, so it never lands in the request
 body and never becomes part of the airlock payload hash or the signed receipt.
 
-Nine commands, split by blast radius:
-
-  read  (no approval)   customer_find, invoice_list, invoice_get,
-                        subscription_list
-  write (airlock gate)  customer_create, invoice_create, invoice_send,
-                        invoice_void, subscription_cancel
+Twenty-eight commands: fifteen read-only operations, thirteen airlock-gated
+writes, and three governed AI decision-support commands. Billing behavior is
+kept separate from AI: AI can recommend review priorities but cannot charge,
+send, or alter Stripe.
 
 Design notes worth knowing before you edit this file:
 
@@ -58,10 +56,9 @@ _CREDIT_NOTE_ELIGIBLE = ("open",)
 def _api_key():
     """Read the Stripe secret from the local vault.
 
-    Field name is not consistent across the RailCall codebase: the Integrations
-    tab writes STRIPE_SECRET_KEY, while the built-in refund handler looks for
-    api_key or secret_key. We accept all three so the module works no matter
-    which path the operator used to save the key.
+    Station v0.48+ resolves both legacy keys.local.json and the default named
+    credential saved through Studio's Configure card. We retain the historical
+    field aliases so existing installations need no credential migration.
     """
     helpers = __rc_helpers__  # noqa: F821
     entry = helpers["vault_get"]("stripe")
@@ -78,10 +75,9 @@ def _api_key():
 
     if not key:
         raise RuntimeError(
-            "no Stripe key in the vault. Open Studio, go to Integrations, find "
-            "the stripe card, and save your key under the legacy STRIPE_SECRET_KEY "
-            "field. Note that the newer Add credential button writes to a "
-            "different store that handlers cannot read."
+            "no Stripe key in the vault. Open Studio → Integrations → Stripe and "
+            "save a secret key with Configure. Existing legacy STRIPE_SECRET_KEY "
+            "entries are also supported."
         )
     if not key.startswith(("sk_", "rk_")):
         raise RuntimeError(
@@ -196,6 +192,30 @@ def _need_str(inputs, field, hint=""):
     if not isinstance(value, str) or not value.strip():
         raise RuntimeError(field + " must be a non-empty string" + (". " + hint if hint else ""))
     return value.strip()
+
+
+def _whole_int(value, field, minimum=None):
+    """Accept integer values (or legacy integer strings), never truncate floats.
+
+    Money arrives in cents.  ``int(12.5)`` silently becoming 12 is unsafe, so
+    every cents field uses this strict parser rather than Python's coercion.
+    """
+    if isinstance(value, bool):
+        raise RuntimeError(field + " must be a whole number")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text or (text[0] in "+-" and not text[1:].isdigit()) or (
+            text[0] not in "+-" and not text.isdigit()
+        ):
+            raise RuntimeError(field + " must be a whole number")
+        number = int(text)
+    else:
+        raise RuntimeError(field + " must be a whole number")
+    if minimum is not None and number < minimum:
+        raise RuntimeError(field + " must be at least " + str(minimum))
+    return number
 
 
 def _clamp_limit(inputs, default=10):
@@ -428,8 +448,8 @@ def stripe_billing_invoice_create(inputs, stamp):
         if not isinstance(description, str) or not description.strip():
             raise RuntimeError(where + ".description must be a non-empty string")
         try:
-            amount = int(item.get("amount_cents"))
-        except Exception:
+            amount = _whole_int(item.get("amount_cents"), where + ".amount_cents")
+        except RuntimeError:
             raise RuntimeError(
                 where + ".amount_cents must be a whole number of cents. "
                 "250.00 dollars is 25000."
@@ -748,7 +768,7 @@ def stripe_billing_bill_client(inputs, stamp):
         raise RuntimeError("email must contain '@'")
     description = _need_str(inputs, "description")
     try:
-        amount = int(inputs.get("amount_cents"))
+        amount = _whole_int(inputs.get("amount_cents"), "amount_cents")
     except Exception:
         raise RuntimeError(
             "amount_cents must be a whole number of cents. 250.00 dollars is 25000."
@@ -844,7 +864,7 @@ def stripe_billing_credit_note_create(inputs, stamp):
     """
     invoice_id = _need_str(inputs, "invoice_id", "Stripe invoice ids start with in_")
     try:
-        amount = int(inputs.get("amount_cents"))
+        amount = _whole_int(inputs.get("amount_cents"), "amount_cents")
     except Exception:
         raise RuntimeError(
             "amount_cents must be a whole number of cents. 250.00 dollars is 25000."
@@ -918,7 +938,7 @@ def stripe_billing_refund_create(inputs, stamp):
     amount_cents = inputs.get("amount_cents")
     if amount_cents is not None:
         try:
-            amt = int(amount_cents)
+            amt = _whole_int(amount_cents, "amount_cents")
         except Exception:
             raise RuntimeError("amount_cents must be a whole number of cents")
         if amt <= 0:
@@ -1034,7 +1054,7 @@ def stripe_billing_coupon_create(inputs, stamp):
         currency = "usd"
     else:
         try:
-            cents = int(amount_off)
+            cents = _whole_int(amount_off, "amount_cents_off")
         except Exception:
             raise RuntimeError("amount_cents_off must be a whole number of cents")
         if cents <= 0:
@@ -1152,7 +1172,7 @@ def stripe_billing_price_create(inputs, stamp):
     """
     product_id = _need_str(inputs, "product_id", "run product_create or product_list to get one")
     try:
-        amount = int(inputs.get("unit_amount_cents"))
+        amount = _whole_int(inputs.get("unit_amount_cents"), "unit_amount_cents")
     except Exception:
         raise RuntimeError("unit_amount_cents must be a whole number of cents")
     if amount <= 0:
@@ -1345,19 +1365,16 @@ def stripe_billing_mandate_get(inputs, stamp):
 
 # ------------------------------------------------------------------ LLM helpers
 
-def _llm_complete(messages, module_id="dave/stripe-invoicing", module_version="v1.2.3"):
-    """Call station.llm.complete() with correct module attribution.
-
-    Falls back gracefully if station_llm is not available (e.g. station < v0.45).
-    Returns the reply string or raises RuntimeError with a clear message.
-    """
+def _llm_complete(messages, step_id="legacy_ai_command"):
+    """Call Station's governed LLM path for decision support only."""
     try:
         import station_llm as _sl  # noqa: F401 -- injected by station ROOT path
         result = _sl.complete(
             messages,
             provider="groq",
-            module_id=module_id,
-            module_version=module_version,
+            module_id="dave/stripe-invoicing",
+            module_version="v1.2.5",
+            step_id=step_id,
             caller_kind="module",
         )
     except ImportError:
@@ -1374,7 +1391,7 @@ def _llm_complete(messages, module_id="dave/stripe-invoicing", module_version="v
     return reply, result.get("receipt_id", "")
 
 
-def stripe_billing_invoice_description_generate(inputs, stamp):
+def _legacy_invoice_description_generate(inputs, stamp):
     """Generate a professional invoice line-item description using an LLM.
 
     Takes a short context (service name, period, client name) and returns
@@ -1426,7 +1443,7 @@ def stripe_billing_invoice_description_generate(inputs, stamp):
     }, None
 
 
-def stripe_billing_dunning_message_draft(inputs, stamp):
+def _legacy_dunning_message_draft(inputs, stamp):
     """Draft a follow-up message for an overdue invoice using an LLM.
 
     Takes invoice data (typically from invoice_get or aging_report) and
@@ -1502,7 +1519,7 @@ def stripe_billing_dunning_message_draft(inputs, stamp):
     }, None
 
 
-def stripe_billing_client_summary_insight(inputs, stamp):
+def _legacy_client_summary_insight(inputs, stamp):
     """Generate a plain-English account insight from customer summary data.
 
     Takes the output of customer_summary (or equivalent fields) and produces
@@ -1563,3 +1580,207 @@ def stripe_billing_client_summary_insight(inputs, stamp):
         "receipt_id": receipt_id,
         "note": "LLM call governed via station.llm — egress receipt written to audit log",
     }, None
+
+
+# ---------------------------------------------------- AI decision support
+
+def _metric(inputs, field, required=True, minimum=0):
+    raw = inputs.get(field)
+    if raw is None and not required:
+        return 0
+    try:
+        value = _whole_int(raw, field)
+    except RuntimeError:
+        raise RuntimeError(field + " must be a whole number")
+    if value < minimum:
+        raise RuntimeError(field + " must be at least " + str(minimum))
+    return value
+
+
+def _decision_json(reply, command_id):
+    """Accept structured model output only; never promote free text as advice."""
+    text = reply.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3].rstrip()
+    try:
+        parsed = _json.loads(text)
+    except Exception:
+        raise RuntimeError("invalid_ai_response: " + command_id + " returned non-JSON decision support")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("invalid_ai_response: " + command_id + " returned a non-object decision payload")
+    return parsed
+
+
+def _invalid_ai_response(command_id, detail):
+    raise RuntimeError("invalid_ai_response: " + command_id + " " + detail)
+
+
+def _ai_string(command_id, result, field, allowed=None, maximum=600):
+    value = result.get(field)
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > maximum:
+        _invalid_ai_response(command_id, field + " must be a non-empty string up to " + str(maximum) + " characters")
+    value = value.strip()
+    if allowed is not None and value not in allowed:
+        _invalid_ai_response(command_id, field + " must be one of: " + ", ".join(allowed))
+    return value
+
+
+def _ai_int(command_id, result, field, minimum, maximum):
+    value = result.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > maximum:
+        _invalid_ai_response(command_id, field + " must be an integer from " + str(minimum) + " to " + str(maximum))
+    return value
+
+
+def _validate_risk_response(result):
+    command_id = "payment_risk_assess"
+    clean = {
+        "risk_level": _ai_string(command_id, result, "risk_level", ("low", "medium", "high"), 10),
+        "risk_score": _ai_int(command_id, result, "risk_score", 0, 100),
+        "recommended_review": _ai_string(command_id, result, "recommended_review", maximum=400),
+    }
+    drivers = result.get("drivers")
+    if not isinstance(drivers, list) or not 1 <= len(drivers) <= 3:
+        _invalid_ai_response(command_id, "drivers must be an array with 1 to 3 items")
+    clean["drivers"] = []
+    for driver in drivers:
+        if not isinstance(driver, str) or not driver.strip() or len(driver.strip()) > 200:
+            _invalid_ai_response(command_id, "drivers entries must be non-empty strings up to 200 characters")
+        clean["drivers"].append(driver.strip())
+    return clean
+
+
+def _validate_strategy_response(result):
+    command_id = "collection_strategy_recommend"
+    return {
+        "urgency": _ai_string(command_id, result, "urgency", ("low", "medium", "high"), 10),
+        "recommended_action": _ai_string(command_id, result, "recommended_action", maximum=300),
+        "wait_days": _ai_int(command_id, result, "wait_days", 0, 30),
+        "escalation_needed": _ai_string(command_id, result, "escalation_needed", ("yes", "no"), 3),
+        "rationale": _ai_string(command_id, result, "rationale", maximum=600),
+    }
+
+
+def _validate_anomaly_response(result, permitted_refs):
+    command_id = "billing_anomaly_detect"
+    clean = {
+        "portfolio_risk": _ai_string(command_id, result, "portfolio_risk", ("low", "medium", "high"), 10),
+        "anomalies": [],
+        "recommended_review_order": [],
+    }
+    anomalies = result.get("anomalies")
+    if not isinstance(anomalies, list) or len(anomalies) > len(permitted_refs):
+        _invalid_ai_response(command_id, "anomalies must be an array no larger than the submitted portfolio")
+    seen = set()
+    for anomaly in anomalies:
+        if not isinstance(anomaly, dict):
+            _invalid_ai_response(command_id, "each anomaly must be an object")
+        ref = anomaly.get("record_ref")
+        if not isinstance(ref, str) or ref not in permitted_refs or ref in seen:
+            _invalid_ai_response(command_id, "anomaly record_ref must be a unique submitted opaque reference")
+        seen.add(ref)
+        severity = anomaly.get("severity")
+        reason = anomaly.get("reason")
+        if severity not in ("low", "medium", "high"):
+            _invalid_ai_response(command_id, "anomaly severity must be low, medium, or high")
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 300:
+            _invalid_ai_response(command_id, "anomaly reason must be a non-empty string up to 300 characters")
+        clean["anomalies"].append({"record_ref": ref, "severity": severity, "reason": reason.strip()})
+    review_order = result.get("recommended_review_order")
+    if not isinstance(review_order, list) or len(review_order) > len(permitted_refs):
+        _invalid_ai_response(command_id, "recommended_review_order must be an array within the submitted portfolio")
+    for ref in review_order:
+        if not isinstance(ref, str) or ref not in permitted_refs or ref in clean["recommended_review_order"]:
+            _invalid_ai_response(command_id, "recommended_review_order entries must be unique submitted opaque references")
+        clean["recommended_review_order"].append(ref)
+    return clean
+
+
+def _decision_result(result, receipt_id):
+    result["ok"] = True
+    result["loaded_from"] = "module:dave/stripe-invoicing"
+    result["receipt_id"] = receipt_id
+    result["decision_support_only"] = True
+    result["note"] = "Review before acting; this command cannot send, charge, or alter Stripe."
+    return result, None
+
+
+def stripe_billing_payment_risk_assess(inputs, stamp):
+    """Assess payment risk from aggregate metrics only; no PII is sent to the LLM."""
+    metrics = {
+        "open_invoice_count": _metric(inputs, "open_invoice_count"),
+        "overdue_invoice_count": _metric(inputs, "overdue_invoice_count"),
+        "oldest_overdue_days": _metric(inputs, "oldest_overdue_days"),
+        "outstanding_cents": _metric(inputs, "outstanding_cents"),
+        "paid_on_time_count": _metric(inputs, "paid_on_time_count", required=False),
+        "paid_late_count": _metric(inputs, "paid_late_count", required=False),
+    }
+    reply, receipt_id = _llm_complete([
+        {"role": "system", "content": "You are a conservative accounts-receivable risk analyst. Assess only the aggregate metrics supplied. Do not infer identity, invent facts, or recommend an automated action. Return strict JSON with risk_level (low|medium|high), risk_score (0-100 integer), drivers (max 3 strings), and recommended_review (string)."},
+        {"role": "user", "content": "Aggregate account metrics, with no customer identity or contact data: " + _json.dumps(metrics, sort_keys=True, separators=(",", ":"))},
+    ], "payment_risk_assess")
+    return _decision_result(_validate_risk_response(_decision_json(reply, "payment_risk_assess")), receipt_id)
+
+
+def stripe_billing_collection_strategy_recommend(inputs, stamp):
+    """Recommend a reviewable collection step from minimised delinquency facts."""
+    risk_level = _need_str(inputs, "risk_level").lower()
+    if risk_level not in ("low", "medium", "high"):
+        raise RuntimeError("risk_level must be one of: low, medium, high")
+    facts = {
+        "risk_level": risk_level,
+        "days_overdue": _metric(inputs, "days_overdue"),
+        "outstanding_cents": _metric(inputs, "outstanding_cents"),
+        "prior_reminder_count": _metric(inputs, "prior_reminder_count"),
+        "dispute_open": _metric(inputs, "dispute_open", required=False),
+        "payment_commitment_present": _metric(inputs, "payment_commitment_present", required=False),
+    }
+    reply, receipt_id = _llm_complete([
+        {"role": "system", "content": "You are a conservative collections operations advisor. Recommend a human-reviewed next step only; never draft or send a message, never promise legal action, and never decide automatically. Return strict JSON with urgency (low|medium|high), recommended_action (string), wait_days (0-30 integer), escalation_needed (yes|no), and rationale (max 2 sentences)."},
+        {"role": "user", "content": "Minimised collections facts with no customer, invoice, email, or account identifiers: " + _json.dumps(facts, sort_keys=True, separators=(",", ":"))},
+    ], "collection_strategy_recommend")
+    return _decision_result(_validate_strategy_response(_decision_json(reply, "collection_strategy_recommend")), receipt_id)
+
+
+def stripe_billing_billing_anomaly_detect(inputs, stamp):
+    """Review anonymised portfolio metrics for billing anomalies before action."""
+    period = _need_str(inputs, "billing_period")
+    if len(period) > 32:
+        raise RuntimeError("billing_period must be 32 characters or fewer")
+    raw_portfolio = inputs.get("portfolio")
+    if not isinstance(raw_portfolio, list) or not raw_portfolio:
+        raise RuntimeError("portfolio must be a non-empty array of anonymised metrics")
+    if len(raw_portfolio) > 50:
+        raise RuntimeError("portfolio supports at most 50 records per assessment")
+    portfolio = []
+    for row in raw_portfolio:
+        if not isinstance(row, dict):
+            raise RuntimeError("each portfolio record must be an object")
+        ref = _need_str(row, "record_ref", "use an opaque local reference, never an email or Stripe customer id")
+        if "@" in ref or ref.startswith(("cus_", "in_")) or len(ref) > 64:
+            raise RuntimeError("record_ref must be an opaque non-PII reference, not an email or Stripe id")
+        amount = _metric(row, "amount_cents")
+        prior = _metric(row, "prior_amount_cents", required=False)
+        portfolio.append({
+            "record_ref": ref,
+            "amount_cents": amount,
+            "prior_amount_cents": prior,
+            "invoice_count": _metric(row, "invoice_count", required=False),
+            "overdue_days": _metric(row, "overdue_days", required=False),
+            "change_cents": amount - prior,
+        })
+    payload = {
+        "billing_period": period,
+        "portfolio_baseline_cents": _metric(inputs, "portfolio_baseline_cents", required=False),
+        "records": portfolio,
+    }
+    reply, receipt_id = _llm_complete([
+        {"role": "system", "content": "You are a conservative billing-control analyst. Identify only review candidates from anonymised portfolio metrics. Do not infer identity, accuse fraud, or authorize charges. Return strict JSON with portfolio_risk (low|medium|high), anomalies (array of objects containing record_ref, severity low|medium|high, reason), and recommended_review_order (array of record_ref values)."},
+        {"role": "user", "content": "Anonymised billing portfolio; record_ref values are opaque tokens and no contact data is present: " + _json.dumps(payload, sort_keys=True, separators=(",", ":"))},
+    ], "billing_anomaly_detect")
+    return _decision_result(
+        _validate_anomaly_response(_decision_json(reply, "billing_anomaly_detect"), {row["record_ref"] for row in portfolio}),
+        receipt_id,
+    )
