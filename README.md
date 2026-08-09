@@ -1,92 +1,71 @@
 # Stripe Invoicing for RailCall
 
-`dave/stripe-invoicing` v1.2.5 provides governed Stripe accounts-receivable operations for RailCall Station. It is designed for operators who need automation without allowing an agent or an LLM to move money independently.
+`dave/stripe-invoicing` v1.3.0 provides governed Stripe accounts-receivable operations for RailCall Station v0.66. It is designed for operators who need automation without allowing an agent or LLM to move money independently.
 
-Demo video: https://youtu.be/7wtXK724Kig
+Demo video: https://youtu.be/C6INOasnOsM
 
 ## Command surface
 
-The module registers exactly 28 commands under `stripe.billing.*`:
+The module registers exactly 29 commands under `stripe.billing.*`:
 
-- 15 `read` commands with no external side effects.
-- 13 `write_requires_approval` commands that stop at the Station airlock.
-- All 28 declare `receipt_required: true`.
+- 16 `read` commands with no external side effects;
+- 13 `write_requires_approval` commands that stop at Approval Airlock;
+- all 29 require Station receipts.
 
-### Read commands
+Read commands include Stripe lookup/reporting operations and four governed AI decision-support commands:
 
-- `stripe.billing.customer_find`
-- `stripe.billing.invoice_list`
-- `stripe.billing.invoice_get`
-- `stripe.billing.subscription_list`
-- `stripe.billing.customer_summary`
-- `stripe.billing.aging_report`
-- `stripe.billing.payment_method_list`
-- `stripe.billing.coupon_list`
-- `stripe.billing.product_list`
-- `stripe.billing.price_list`
-- `stripe.billing.usage_summary_list`
-- `stripe.billing.mandate_get`
 - `stripe.billing.payment_risk_assess`
 - `stripe.billing.collection_strategy_recommend`
 - `stripe.billing.billing_anomaly_detect`
+- `stripe.billing.dunning_message_draft`
 
-### Approval-controlled write commands
+Approval-controlled writes cover customer, invoice, subscription, credit-note, refund, coupon, promotion-code, product, price, usage, and composite billing operations. `stripe.billing.bill_client` remains the composite operation: find or create a customer, create the invoice and line item, finalize it, and send it behind one exact-payload approval.
 
-- `stripe.billing.customer_create`
-- `stripe.billing.invoice_create`
-- `stripe.billing.invoice_send`
-- `stripe.billing.invoice_void`
-- `stripe.billing.subscription_cancel`
-- `stripe.billing.bill_client`
-- `stripe.billing.credit_note_create`
-- `stripe.billing.refund_create`
-- `stripe.billing.coupon_create`
-- `stripe.billing.promotion_code_create`
-- `stripe.billing.product_create`
-- `stripe.billing.price_create`
-- `stripe.billing.usage_record_create`
+## Incremental invoice listing
 
-`stripe.billing.bill_client` remains the composite billing operation: find or create a customer, create the invoice and line item, finalize it, and send it behind one human approval.
+The existing `stripe.billing.invoice_list` supports ordinary manual reads and Station-managed incremental execution; no parallel incremental handler was added.
+
+- Station injects `since` and `exclude_invoice_ids`.
+- Results use stable provider `invoice_id` cursors and deterministic oldest-to-newest ordering.
+- Each invoice exposes provider `description` for deterministic workflow history matching.
+- Complete results report `truncated: false`; capped partial results report `truncated: true`.
+- Truncated runs cannot settle the schedule-owned watermark.
+- Manual runs do not advance schedule-owned state.
+- Station v0.66 expires timestamped seen cursors according to the declared window while preserving compatible legacy state.
+
+The schedulable contract uses concurrency `skip`, a 15-minute minimum interval, and a 5-minute maximum runtime. It is consumed by workflows such as `dave/retainer-billing-run` rather than by creating another command.
 
 ## AI decision support
 
-The three AI commands are read-only decision-support tools:
+All four AI commands are read-only, structured, minimized, and fail closed. They cannot create, send, void, refund, cancel, approve, or otherwise modify Stripe state.
 
-- `stripe.billing.payment_risk_assess` evaluates minimized aggregate payment metrics and returns a structured risk level, score, drivers, and review recommendation.
-- `stripe.billing.collection_strategy_recommend` returns a reviewable next-step strategy from minimized delinquency facts. It does not draft or send messages.
-- `stripe.billing.billing_anomaly_detect` reviews an anonymized billing portfolio using opaque record references.
+`stripe.billing.dunning_message_draft` reuses and modernizes the existing private legacy implementation. It receives billing facts—not customer email, Stripe customer ID, or invoice ID—and returns a validated JSON draft with `subject` and `body`. It cannot send the draft or authorize a financial action.
 
-All three use Station's governed LLM entry point with Groq provider routing. They return `decision_support_only: true`, require structured JSON, and reject invalid schemas as `invalid_ai_response`. Enum values, required fields, integer ranges, list sizes, and opaque record references are validated fail-closed.
-
-AI commands never create, send, void, refund, cancel, or otherwise modify Stripe state. They never approve a charge and are not a financial gate. Each call is attributed to this module and uses Station's egress-governance path.
-
-Data sent to the LLM is minimized:
-
-- Payment risk uses aggregate counts and amounts only.
-- Collection strategy uses delinquency facts without customer, invoice, email, or account identifiers.
-- Anomaly detection rejects email addresses and Stripe-style customer or invoice IDs in `record_ref`.
+Invalid JSON, wrong output shapes, unsafe references, invalid enums, non-whole integer inputs, and out-of-range values return `invalid_ai_response` or an input-validation error. Live Groq completion has not been demonstrated and is not claimed here or in the demo video.
 
 ## Financial guardrails
 
-### Human approval
+### Approval
 
-Every write is classified as `write_requires_approval`, has external side effects, and must pass through the Station airlock. Read and AI commands cannot mutate Stripe.
+Every Stripe mutation is `write_requires_approval`, declares external side effects, and stops before provider execution until the exact payload is approved. Read and AI commands cannot mutate Stripe.
 
 ### Idempotency
 
-Stripe writes use an `Idempotency-Key` derived from Station's approved airlock payload hash. Retrying the same approved payload therefore reuses the same effect identity. If the `airlock_payload_hash` helper is unavailable, execution fails hard instead of sending an unprotected write.
+Writes derive the Stripe `Idempotency-Key` from Station's approved `airlock_payload_hash()`. Retrying the same approved payload retains the same effect identity; changing the payload changes its approval/hash binding. Missing idempotency support fails hard before an unprotected write. Idempotency is safe-retry protection, not automatic rollback.
 
 ### Strict money validation
 
-Money inputs use integer cents. Booleans, floats, fractional strings, zero where a positive amount is required, and negative values are rejected before provider execution. The handler never silently truncates a float.
+Money inputs use integer cents. Booleans, floats, fractional strings, zero where a positive amount is required, and negative values are rejected before provider execution. The manifest uses Semantic-Firewall-compatible type `number` where needed, while the handler still enforces whole integers.
 
 ### Receipts
 
-Every command requires a Station receipt. Approval state, result state, and governed LLM egress are recorded by Station; receipt signing and verification remain platform responsibilities.
+Every command requires a Station receipt. Approval state, result state, payload/integrity hashes, signatures, and governed egress remain Station responsibilities. Provider success should be claimed only when supported by an actual provider receipt or effect.
 
-## Sandbox capabilities
+## Credentials and sandbox
 
-The v1.2.5 manifest declares least-privilege capabilities:
+Configure Stripe through Studio → Integrations → Stripe. The handler resolves `vault_get("stripe")` at execution time and supports the existing `STRIPE_SECRET_KEY`, `api_key`, `secret_key`, and `token` fields. The key is used only in the Stripe `Authorization` header; it is not added to command inputs, payload hashes, normal results, or receipts.
+
+The final least-privilege capabilities are:
 
 ```json
 {
@@ -96,15 +75,7 @@ The v1.2.5 manifest declares least-privilege capabilities:
 }
 ```
 
-`allowed_destinations` contains only the governed Groq provider destination. The module does not request subprocess execution or filesystem writes.
-
-## Credentials
-
-Open Studio → Integrations → Stripe → Configure and save a Stripe secret key. Station v0.48+ can resolve the default named credential, while the handler remains backward compatible with existing `STRIPE_SECRET_KEY` entries and the aliases `api_key`, `secret_key`, and `token`. No credential migration is required.
-
-The key is read from the local vault at call time and sent only in the Stripe `Authorization` header. It is not added to command inputs, payload hashes, or module results. Stripe test keys and restricted secret keys are accepted; publishable keys are rejected.
-
-The three AI commands require the Station-managed Groq credential used by `station.llm`.
+The AI commands use Station's managed Groq credential and governed LLM path. The module does not request subprocess execution or filesystem writes.
 
 ## Install
 
@@ -112,7 +83,7 @@ The three AI commands require the Station-managed Groq credential used by `stati
 railcall market install dave/stripe-invoicing
 ```
 
-After restarting or reloading Station, the module should report v1.2.5 with 28 commands and no missing handlers.
+After Station reloads, the module should report v1.3.0 with exactly 29 commands and no missing handlers.
 
 ## Example
 
@@ -126,18 +97,14 @@ After restarting or reloading Station, the module should report v1.2.5 with 28 c
 }
 ```
 
-This example documents the input contract only. It is not a claim that the current Station v0.55 provider call completed; see the limitation below.
+This documents the input contract only; it is not a claim of provider execution.
 
 ## Known limitations
 
-- **Station v0.55 sandbox DNS bug:** live Stripe and Groq provider execution is currently blocked when an allowed hostname resolves to an IP address and the runtime checks that IP against the hostname allowlist. The module and manifest validate correctly; this is an official Station runtime limitation already reported to the core team.
-- Amounts are integer cents. For example, use `25000`, not `250.00`.
-- `credit_note_create` is limited to open invoices. Paid invoices should use `refund_create`.
-- `invoice_void` is for open invoices; drafts should be edited and paid invoices refunded.
+- Live Groq completion remains unverified.
+- Studio may not render incremental/schedulable capability badges consistently even though parsing, injection, execution, and settlement passed.
+- Stripe usage aggregation is asynchronous, so `usage_summary_list` can lag after usage is recorded.
+- `credit_note_create` is limited to open invoices; paid invoices should use `refund_create`.
+- `invoice_void` applies to open invoices; drafts should be edited and paid invoices refunded.
 - `price_create` requires an interval when `meter_id` is supplied.
-- Usage aggregation is asynchronous, so `usage_summary_list` may remain empty for roughly 20–30 seconds after recording usage.
-- `mandate_get` is read-only because mandates are created as a side effect of supported payment setup flows.
-- Invoices use one currency, defaulting to USD.
-- Subscription support is cancel-only.
-- `payment_method_list` defaults to `card`; pass another explicit type when needed.
-- Studio's manifest schema does not express a boolean type for `at_period_end`; the handler enforces valid boolean input.
+- Subscription support is cancel-only, and invoices use one currency per invoice.

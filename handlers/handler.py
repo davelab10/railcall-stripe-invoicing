@@ -1,4 +1,4 @@
-"""dave/stripe-invoicing v1.2.5 - governed Stripe receivables.
+"""dave/stripe-invoicing v1.3.0 - governed Stripe receivables.
 
 Vault entry `stripe` in keys.local.json:
     { "STRIPE_SECRET_KEY": "sk_test_..." }
@@ -7,8 +7,8 @@ The key never leaves this machine. It is read through vault_get at call time
 and injected as an Authorization header only, so it never lands in the request
 body and never becomes part of the airlock payload hash or the signed receipt.
 
-Twenty-eight commands: fifteen read-only operations, thirteen airlock-gated
-writes, and three governed AI decision-support commands. Billing behavior is
+Twenty-nine commands: sixteen read-only operations, thirteen airlock-gated
+writes, and four governed AI decision-support commands. Billing behavior is
 kept separate from AI: AI can recommend review priorities but cannot charge,
 send, or alter Stripe.
 
@@ -33,6 +33,7 @@ Design notes worth knowing before you edit this file:
 """
 
 import json as _json
+import datetime as _datetime
 import urllib.parse as _urlparse
 
 STRIPE_API = "https://api.stripe.com/v1"
@@ -222,11 +223,54 @@ def _clamp_limit(inputs, default=10):
     raw = inputs.get("limit")
     if raw is None:
         return default
-    try:
-        limit = int(raw)
-    except Exception:
-        raise RuntimeError("limit must be a whole number")
+    limit = _whole_int(raw, "limit")
     return max(1, min(limit, 100))
+
+
+def _incremental_since(inputs):
+    """Validate Station's injected timestamp and return canonical UTC + epoch."""
+    raw = inputs.get("since")
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str) or not raw.strip() or len(raw.strip()) > 64:
+        raise RuntimeError("since must be a non-empty ISO-8601 timestamp string")
+    text = raw.strip()
+    try:
+        parsed = _datetime.datetime.fromisoformat(
+            text[:-1] + "+00:00" if text.endswith("Z") else text
+        )
+    except (TypeError, ValueError):
+        raise RuntimeError("since must be a valid ISO-8601 timestamp")
+    if parsed.tzinfo is None:
+        raise RuntimeError("since must include a timezone")
+    parsed = parsed.astimezone(_datetime.timezone.utc).replace(microsecond=0)
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ"), int(parsed.timestamp())
+
+
+def _incremental_seen(inputs, incremental):
+    raw = inputs.get("exclude_invoice_ids")
+    if raw is None:
+        return set()
+    if not incremental:
+        raise RuntimeError("exclude_invoice_ids requires since")
+    if not isinstance(raw, list):
+        raise RuntimeError("exclude_invoice_ids must be an array of invoice ID strings")
+    if len(raw) > 5000:
+        raise RuntimeError("exclude_invoice_ids supports at most 5000 entries")
+    seen = set()
+    for value in raw:
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 255:
+            raise RuntimeError("exclude_invoice_ids entries must be non-empty strings up to 255 characters")
+        seen.add(value.strip())
+    return seen
+
+
+def _created_at(value):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError("Stripe invoice response is missing a valid created timestamp")
+    return _datetime.datetime.fromtimestamp(
+        value, tz=_datetime.timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _period_end(subscription):
@@ -278,7 +322,16 @@ def stripe_billing_customer_find(inputs, stamp):
 
 
 def stripe_billing_invoice_list(inputs, stamp):
-    form = {"limit": _clamp_limit(inputs)}
+    limit = _clamp_limit(inputs)
+    since, since_epoch = _incremental_since(inputs)
+    excluded = _incremental_seen(inputs, since is not None)
+    form = {"limit": limit}
+
+    if since_epoch is not None:
+        # The Station deliberately injects a lookback-adjusted watermark. GTE
+        # preserves that overlap; exclude_invoice_ids removes already-delivered
+        # provider IDs before any downstream effect can see them.
+        form["created[gte]"] = since_epoch
 
     customer_id = inputs.get("customer_id")
     if isinstance(customer_id, str) and customer_id.strip():
@@ -294,17 +347,36 @@ def stripe_billing_invoice_list(inputs, stamp):
 
     status, parsed = _call("GET", "/invoices", form)
     rows = parsed.get("data") or []
+    if not isinstance(rows, list):
+        raise RuntimeError("Stripe invoice list returned an invalid data array")
 
     outstanding = 0
     invoices = []
+    skipped_already_delivered = 0
     for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("Stripe invoice list returned a non-object invoice")
+        invoice_id = row.get("id")
+        if not isinstance(invoice_id, str) or not invoice_id.strip():
+            raise RuntimeError("Stripe invoice response is missing a stable invoice id")
+        invoice_id = invoice_id.strip()
+        if invoice_id in excluded:
+            skipped_already_delivered += 1
+            continue
+        created = row.get("created")
+        created_at = _created_at(created)
+        if since_epoch is not None and created < since_epoch:
+            # Defensive provider-boundary check: never trust a remote filter to
+            # satisfy the incremental contract on its own.
+            continue
         due = row.get("amount_due") or 0
         currency = row.get("currency") or "usd"
         if row.get("status") == "open":
             outstanding += due
         invoices.append({
-            "invoice_id": row.get("id"),
+            "invoice_id": invoice_id,
             "number": row.get("number") or "",
+            "description": row.get("description") or "",
             "status": row.get("status"),
             "amount_due": _money(due, currency),
             "amount_due_cents": due,
@@ -312,7 +384,14 @@ def stripe_billing_invoice_list(inputs, stamp):
             "customer_email": row.get("customer_email") or "",
             "due_date": row.get("due_date"),
             "hosted_invoice_url": row.get("hosted_invoice_url") or "",
+            "created": created,
+            "created_at": created_at,
         })
+
+    if since is not None:
+        # Stripe lists newest-first. Scheduled delivery is oldest-first with a
+        # provider-ID tie-breaker, making downstream order deterministic.
+        invoices.sort(key=lambda item: (item["created_at"], item["invoice_id"]))
 
     currency = rows[0].get("currency") if rows else "usd"
     return {
@@ -323,6 +402,9 @@ def stripe_billing_invoice_list(inputs, stamp):
         "total_outstanding": _money(outstanding, currency),
         "total_outstanding_cents": outstanding,
         "invoices": invoices,
+        "since": since or "",
+        "skipped_already_delivered": skipped_already_delivered,
+        "truncated": bool(parsed.get("has_more")),
     }, None
 
 
@@ -1373,7 +1455,7 @@ def _llm_complete(messages, step_id="legacy_ai_command"):
             messages,
             provider="groq",
             module_id="dave/stripe-invoicing",
-            module_version="v1.2.5",
+            module_version="v1.3.0",
             step_id=step_id,
             caller_kind="module",
         )
@@ -1443,79 +1525,63 @@ def _legacy_invoice_description_generate(inputs, stamp):
     }, None
 
 
-def _legacy_dunning_message_draft(inputs, stamp):
-    """Draft a follow-up message for an overdue invoice using an LLM.
-
-    Takes invoice data (typically from invoice_get or aging_report) and
-    generates a ready-to-send dunning email. Tone is configurable. The
-    operator should review the draft before sending.
-
-    Requires a Groq API key stored in the vault:
-        keys.local.json: {"groq": {"GROQ_API_KEY": "gsk_..."}}
-
-    Returns:
-        subject:    suggested email subject line
-        body:       email body draft
-        receipt_id: egress receipt id for audit
-    """
-    invoice_id = _need_str(inputs, "invoice_id", "Stripe invoice ids start with in_")
-    customer_email = _need_str(inputs, "customer_email", "the customer's email address")
-    amount_due = str(inputs.get("amount_due") or "").strip()
-    days_overdue = inputs.get("days_overdue")
+def stripe_billing_dunning_message_draft(inputs, stamp):
+    """Draft a payment reminder from minimum non-identifying facts only."""
+    amount_due_cents = _whole_int(inputs.get("amount_due_cents"), "amount_due_cents", 1)
+    days_overdue = _whole_int(inputs.get("days_overdue"), "days_overdue", 0)
     tone = str(inputs.get("tone") or "polite").strip().lower()
     sender_name = str(inputs.get("sender_name") or "Billing Team").strip()
+    currency = str(inputs.get("currency") or "usd").strip().lower()
 
     if tone not in ("polite", "firm", "urgent"):
         raise RuntimeError("tone must be one of: polite, firm, urgent")
-    if days_overdue is not None:
-        try:
-            days_overdue = int(days_overdue)
-        except (ValueError, TypeError):
-            raise RuntimeError("days_overdue must be a whole number")
+    if not sender_name or len(sender_name) > 80:
+        raise RuntimeError("sender_name must be a non-empty string up to 80 characters")
+    if "@" in sender_name or sender_name.startswith(("in_", "cus_")):
+        raise RuntimeError("sender_name must be a non-identifying sender label, not an email or Stripe id")
+    if len(currency) != 3 or not currency.isalpha():
+        raise RuntimeError("currency must be a three-letter alphabetic code")
 
-    context_parts = [
-        f"Invoice ID: {invoice_id}",
-        f"Customer email: {customer_email}",
-    ]
-    if amount_due:
-        context_parts.append(f"Amount due: {amount_due}")
-    if days_overdue is not None:
-        context_parts.append(f"Days overdue: {days_overdue}")
+    facts = {
+        "amount_due_cents": amount_due_cents,
+        "currency": currency,
+        "days_overdue": days_overdue,
+        "tone": tone,
+        "sender_label": sender_name,
+    }
 
     system_prompt = (
-        "You are a billing assistant. Draft a dunning email for an overdue invoice. "
-        "Output a JSON object with two fields: 'subject' (the email subject line) "
-        "and 'body' (the email body). No markdown, no extra explanation. "
-        "Keep body under 200 words."
+        "You are a billing assistant. Draft a human-reviewed payment reminder "
+        "from only the non-identifying facts supplied. Do not infer a customer "
+        "identity, invoice identifier, email address, legal threat, or payment "
+        "promise. Return strict JSON with exactly two string fields: subject "
+        "(maximum 160 characters) and body (maximum 2000 characters)."
     )
     user_prompt = (
-        f"Draft a {tone} dunning email. Sender: {sender_name}.\n"
-        + "\n".join(context_parts)
+        "Minimised overdue-payment facts with no customer, contact, account, "
+        "or Stripe identifiers: " + _json.dumps(facts, sort_keys=True, separators=(",", ":"))
     )
 
     reply, receipt_id = _llm_complete([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
-    ])
+    ], "dunning_message_draft")
 
-    # Try to parse JSON; fall back to treating the whole reply as body
-    subject = ""
-    body = reply.strip()
-    try:
-        parsed = _json.loads(reply)
-        if isinstance(parsed, dict):
-            subject = str(parsed.get("subject") or "").strip()
-            body = str(parsed.get("body") or "").strip()
-    except Exception:
-        pass
+    result = _decision_json(reply, "dunning_message_draft")
+    if set(result) != {"subject", "body"}:
+        _invalid_ai_response("dunning_message_draft", "must contain exactly subject and body")
+    subject = _ai_string("dunning_message_draft", result, "subject", maximum=160)
+    body = _ai_string("dunning_message_draft", result, "body", maximum=2000)
 
     return {
         "ok": True,
         "loaded_from": "module:dave/stripe-invoicing",
-        "subject": subject or f"Invoice {invoice_id} — payment reminder",
+        "subject": subject,
         "body": body,
         "receipt_id": receipt_id,
-        "note": "Draft only — review before sending. LLM call governed via station.llm.",
+        "decision_support_only": True,
+        "draft_only": True,
+        "note": "Draft only — review before sending. This command cannot send, charge, or alter Stripe.",
     }, None
 
 

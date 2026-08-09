@@ -1,13 +1,13 @@
 {
   "id": "dave/stripe-invoicing",
   "name": "Stripe Invoicing for RailCall",
-  "version": "1.2.5",
+  "version": "1.3.0",
   "publisher_pubkey": "1f8c4489a0c417d6cbd9ac9b091fbf3df54e09b8af26105686f41364d4a72902",
   "provider": "stripe",
   "category": "Finance",
   "homepage": "https://davelab10.github.io/portofolio/",
   "tests_url": "https://github.com/davelab10/railcall-stripe-invoicing/blob/main/TESTING.md",
-  "description": "Governed Stripe accounts receivable for RailCall Station. The module exposes 28 commands under stripe.billing.*: 15 read commands and 13 approval-controlled writes that stop at the Station airlock before any external mutation.\n\nBILLING AND COLLECTIONS\nbill_client is the composite monthly-billing path: find or create a customer, prepare an invoice and line item, finalize, and send behind one human approval. Invoice, customer, subscription, refund, credit-note, promotion, catalog, usage, aging, payment-method, and mandate operations retain strict whole-cent validation and deterministic Stripe idempotency derived from the approved payload hash.\n\nAI DECISION SUPPORT\npayment_risk_assess evaluates minimized aggregate payment metrics. collection_strategy_recommend returns a human-reviewable collections plan without drafting or sending a message. billing_anomaly_detect reviews anonymized portfolio metrics before a billing run. All three commands are read-only, structured, fail-closed decision support. AI never authorizes a charge or moves money.\n\nGOVERNANCE\nAll commands require receipts. The sandbox declares only Stripe and Groq network access, no subprocess capability, and no filesystem writes. Existing STRIPE_SECRET_KEY vault entries remain compatible with Station's Configure card and named credentials.\n\nKNOWN LIMITATION\nOn the tested RailCall Station v0.55 runtime, live Stripe and Groq provider completion is blocked by the documented sandbox DNS hostname-to-IP enforcement issue. Module loading, signature, governance, approval, idempotency, validation, and fixture paths are verified; this listing does not claim live Stripe success, live Groq success, or provider-receipt success.\n\nDemo: https://youtu.be/7wtXK724Kig\n\ncontest:2026Q3",
+  "description": "Governed Stripe accounts receivable for RailCall Station. The module exposes 29 commands under stripe.billing.*: 16 read commands and 13 approval-controlled writes that stop at the Station airlock before any external mutation.\n\nBILLING AND COLLECTIONS\nbill_client is the composite monthly-billing path: find or create a customer, prepare an invoice and line item, finalize, and send behind one human approval. invoice_list remains backward compatible for manual use and now declares Station v0.65 incremental and schedulable contracts with provider-ID deduplication, deterministic timestamp watermarks, and explicit truncation.\n\nAI DECISION SUPPORT\npayment_risk_assess evaluates minimized aggregate payment metrics. collection_strategy_recommend returns a human-reviewable collections plan. billing_anomaly_detect reviews anonymized portfolio metrics. dunning_message_draft produces a privacy-minimized, structured draft without sending email or exposing customer/Stripe identifiers to the LLM. All four commands are read-only, structured, fail-closed decision support. AI never authorizes a charge or moves money.\n\nGOVERNANCE\nAll commands require receipts. The sandbox declares only Stripe and Groq network access, no subprocess capability, and no filesystem writes. Existing STRIPE_SECRET_KEY vault entries remain compatible with Station's Configure card and named credentials.\n\nRUNTIME EVIDENCE\nThe v1.3.0 migration targets RailCall Station v0.65. Provider success is claimed only when supported by a real provider receipt; historical runtime limitations from older Station versions are not treated as active v0.65 facts without re-verification.\n\nDemo: https://youtu.be/7wtXK724Kig\n\ncontest:2026Q3",
   "license_required": false,
   "commands": [
     {
@@ -62,13 +62,45 @@
         "limit": {
           "type": "number",
           "required": false
+        },
+        "since": {
+          "type": "string",
+          "required": false,
+          "description": "ISO-8601 timestamp injected by Station for incremental retrieval."
+        },
+        "exclude_invoice_ids": {
+          "type": "array",
+          "required": false,
+          "description": "Invoice IDs already delivered by Station; removed before downstream processing."
         }
       },
       "output_schema": {
         "found": "number",
         "total_outstanding": "string",
+        "total_outstanding_cents": "number",
         "invoices": "array",
-        "http_status": "number"
+        "http_status": "number",
+        "since": "string",
+        "skipped_already_delivered": "number",
+        "truncated": "boolean"
+      },
+      "schedulable": {
+        "concurrency": "skip",
+        "min_interval_minutes": 15,
+        "max_runtime_minutes": 5
+      },
+      "incremental": {
+        "since_param": "since",
+        "seen_param": "exclude_invoice_ids",
+        "items_field": "invoices",
+        "cursor_field": "invoice_id",
+        "watermark_from": "created_at",
+        "watermark_type": "timestamp",
+        "cursor_stability": "provider_id",
+        "initial": "now",
+        "lookback_seconds": 300,
+        "seen_window_seconds": 604800,
+        "max_watermark_jump_seconds": 2592000
       }
     },
     {
@@ -957,6 +989,48 @@
         "portfolio_risk": "string",
         "recommended_review_order": "array",
         "receipt_id": "string"
+      }
+    },
+    {
+      "id": "stripe.billing.dunning_message_draft",
+      "title": "Draft a privacy-minimised payment reminder (AI)",
+      "provider": "groq",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "GROQ_API_KEY"
+      ],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "amount_due_cents": {
+          "type": "number",
+          "required": true
+        },
+        "days_overdue": {
+          "type": "number",
+          "required": true
+        },
+        "currency": {
+          "type": "string",
+          "required": false
+        },
+        "tone": {
+          "type": "string",
+          "required": false
+        },
+        "sender_name": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "subject": "string",
+        "body": "string",
+        "receipt_id": "string",
+        "decision_support_only": "boolean",
+        "draft_only": "boolean"
       }
     }
   ],

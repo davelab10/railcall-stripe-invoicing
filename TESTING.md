@@ -1,145 +1,100 @@
-# Testing report — dave/stripe-invoicing v1.2.5
+# Testing report — dave/stripe-invoicing v1.3.0
 
-Target runtime: RailCall Station v0.55.
+Target runtime: RailCall Station v0.66.
 
-This report records the provider-independent Step 3 checks that were actually completed and separates them from provider calls that Station could not complete.
+Demo video: https://youtu.be/C6INOasnOsM
 
-Status legend:
+This report summarizes the completed module verification. Fixture evidence, policy refusal, and live-provider evidence remain distinct; fixture output is never presented as provider success.
 
-- ✅ **Verified** — directly verified without requiring a successful live Stripe or Groq response.
-- ⚠ **Blocked by Station** — execution reached the official provider path but Station v0.55 blocked the allowed hostname after DNS resolution.
-- 🧪 **Fixture Only** — the handler and validation path were exercised with controlled fixtures or a substituted helper/provider result; this is not a live-provider pass.
+## Final status
 
-Live Stripe and Groq execution are not marked as passed anywhere in this report.
+| Check | Result |
+|---|---|
+| Module identity | `dave/stripe-invoicing` v1.3.0 |
+| Command registration | 29/29 resolved |
+| Classification | 16 `read`; 13 `write_requires_approval` |
+| Module regression | 17/17 PASS |
+| Semantic Firewall | 29/29 PASS |
+| Incremental/schedulable contract | PASS |
+| Signature tree v2 | PASS |
+| Station v0.66 compatibility | PASS; no module migration required |
+| Secret-pattern leakage in audited receipts | 0 |
 
-## Static and loader verification
+All 29 commands declare `receipt_required: true`. The signed installed module and project source matched during the completed runtime step.
 
-| Check | Status | Evidence |
-|---|---|---|
-| Manifest parses as JSON | ✅ Verified | `module/module.json` loaded successfully. |
-| Module identity and version | ✅ Verified | `dave/stripe-invoicing`, v1.2.5. |
-| Command count | ✅ Verified | Exactly 28 manifest commands. |
-| Classification | ✅ Verified | 15 `read`; 13 `write_requires_approval`. |
-| Handler registration | ✅ Verified | All 28 public manifest command IDs resolve to top-level handlers; no missing public handler. |
-| Python compilation | ✅ Verified | `handler.py` compiled during Step 3 validation. |
-| Module load | ✅ Verified | Station loaded v1.2.5 with 28 commands and no module rejection. |
-| Signature | ✅ Verified | Manifest v2/tree signature verification succeeded before Station accepted the module. |
-| Receipt declaration | ✅ Verified | Every manifest command declares `receipt_required: true`. |
-| Sandbox declaration | ✅ Verified | Network allowlist contains only `api.stripe.com` and `api.groq.com`; subprocess is false; filesystem writes are empty. |
+## Incremental `invoice_list`
 
-## Command matrix
+The existing `stripe.billing.invoice_list` supports manual reads and Station-managed incremental execution. No parallel handler was introduced.
 
-The fixture status below means command dispatch, handler binding, input validation, and controlled success/failure handling were exercised. It does not mean Stripe or Groq returned a live success response during Step 3.
+Verified behavior:
 
-| Command | Mode | Step 3 result | Live provider |
-|---|---|---|---|
-| `stripe.billing.customer_find` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.invoice_list` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.invoice_get` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.subscription_list` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.customer_summary` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.aging_report` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.payment_method_list` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.coupon_list` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.product_list` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.price_list` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.usage_summary_list` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.mandate_get` | read | 🧪 Fixture Only | ⚠ Blocked by Station |
-| `stripe.billing.customer_create` | write_requires_approval | 🧪 Fixture Only; approval policy verified | ⚠ Blocked by Station |
-| `stripe.billing.invoice_create` | write_requires_approval | 🧪 Fixture Only; approval policy verified | ⚠ Blocked by Station |
-| `stripe.billing.invoice_send` | write_requires_approval | 🧪 Fixture Only; approval policy verified | ⚠ Blocked by Station |
-| `stripe.billing.invoice_void` | write_requires_approval | 🧪 Fixture Only; approval policy verified | ⚠ Blocked by Station |
-| `stripe.billing.subscription_cancel` | write_requires_approval | 🧪 Fixture Only; approval policy verified | ⚠ Blocked by Station |
-| `stripe.billing.bill_client` | write_requires_approval | 🧪 Composite fixture only; approval and idempotency paths verified | ⚠ Blocked by Station |
-| `stripe.billing.credit_note_create` | write_requires_approval | 🧪 Fixture Only; status precheck verified | ⚠ Blocked by Station |
-| `stripe.billing.refund_create` | write_requires_approval | 🧪 Fixture Only; input validation verified | ⚠ Blocked by Station |
-| `stripe.billing.coupon_create` | write_requires_approval | 🧪 Fixture Only; approval policy verified | ⚠ Blocked by Station |
-| `stripe.billing.promotion_code_create` | write_requires_approval | 🧪 Fixture Only; request shape verified | ⚠ Blocked by Station |
-| `stripe.billing.product_create` | write_requires_approval | 🧪 Fixture Only; approval policy verified | ⚠ Blocked by Station |
-| `stripe.billing.price_create` | write_requires_approval | 🧪 Fixture Only; input combinations verified | ⚠ Blocked by Station |
-| `stripe.billing.usage_record_create` | write_requires_approval | 🧪 Fixture Only; approval and idempotency paths verified | ⚠ Blocked by Station |
-| `stripe.billing.payment_risk_assess` | read | 🧪 Structured-response and fail-closed fixtures verified | ⚠ Blocked by Station |
-| `stripe.billing.collection_strategy_recommend` | read | 🧪 Structured-response and fail-closed fixtures verified | ⚠ Blocked by Station |
-| `stripe.billing.billing_anomaly_detect` | read | 🧪 Structured-response, PII rejection, and reference fixtures verified | ⚠ Blocked by Station |
+- Station injects `since` and `exclude_invoice_ids`.
+- Results use stable `invoice_id` cursors and deterministic oldest-to-newest ordering.
+- Returned items expose provider `description` for workflow history matching.
+- Complete results report `truncated: false`; capped results report `truncated: true`.
+- Truncated execution cannot settle the schedule-owned watermark.
+- Manual execution does not advance schedule-owned state.
+- Station v0.66 expires timestamped seen cursors according to `seen_window_seconds` while preserving compatible legacy state.
+- Whole-integer validation rejects booleans, floats, fractional strings, negative values, and other invalid inputs where applicable.
 
-## Governance and approval
+The manifest uses Semantic-Firewall-compatible schema type `number` for integer-valued fields; the handler still rejects non-whole values.
 
-| Check | Status | Result |
-|---|---|---|
-| All Stripe mutations require approval | ✅ Verified | All 13 write commands are `write_requires_approval`, `side_effects: external`, and `preview: true`. |
-| Read and AI commands avoid mutation | ✅ Verified | All 15 are `read` with `side_effects: none`. |
-| Approval boundary precedes provider execution | ✅ Verified | Write execution entered Station's approval path before the provider attempt. |
-| Receipt requirement | ✅ Verified | All 28 command definitions require receipts. |
-| Live signed Stripe result | ⚠ Blocked by Station | No current live Stripe success is claimed. |
-| Live AI egress result | ⚠ Blocked by Station | No current live Groq success or completed provider response is claimed. |
+## AI and dunning boundaries
 
-## Idempotency and spend protection
+`stripe.billing.dunning_message_draft` reuses and modernizes the existing private legacy implementation as the 29th registered command.
 
-| Check | Status | Result |
-|---|---|---|
-| Approved-payload hash becomes Stripe idempotency key | 🧪 Fixture Only | Controlled helper output was propagated to the `Idempotency-Key` header for write requests. |
-| Missing `airlock_payload_hash` helper | ✅ Verified | Handler fails hard before an unprotected write can be sent. |
-| Composite `bill_client` scopes individual sub-effects | 🧪 Fixture Only | Fixture execution produced distinct indexed scopes for its internal writes. |
-| Zero, negative, boolean, and float money values | ✅ Verified | Strict integer-cent validation rejects unsafe values before provider execution. |
-| Aggregate spend cap | Not a module claim | Native cumulative spend caps belong to the workflow/Station execution policy. At module level, approval, integer-cent validation, and idempotency are the spend protections tested here. |
+Verified behavior:
 
-## Fail-closed validation
+- It is read-only, draft-only, and cannot send or authorize a financial action.
+- Its prompt receives billing facts, not customer email, Stripe customer ID, or invoice ID.
+- Output must be structured JSON containing validated `subject` and `body` fields.
+- Malformed JSON, wrong shapes, invalid enums, unsafe references, and non-whole integer inputs fail closed.
+- The other three AI commands retain minimized, structured, decision-support-only behavior.
 
-The following provider-independent negative paths were verified:
+RailCall-side credential resolution, destination, sandbox, Semantic Firewall, egress classification, and policy checks passed. A live Groq completion was not demonstrated, so this report does not claim one.
 
-- Missing or malformed required strings are rejected.
-- Float cents are rejected rather than truncated.
-- Zero and negative amounts are rejected where the command requires a positive amount.
-- Invalid invoice transitions fail before mutation, including unsupported credit-note and void states.
-- Invalid refund fields and unsupported combinations are rejected.
-- `at_period_end` accepts valid booleans and rejects invalid values.
-- Credential absence and malformed key prefixes fail without exposing a secret.
-- Missing idempotency support stops writes rather than silently omitting the header.
+## Approval, vault, and idempotency
 
-## AI validation and minimization
+All 13 Stripe mutations are `write_requires_approval`, declare external side effects, and stop at Approval Airlock until the exact payload is approved. During full runtime verification, all 13 unapproved write scenarios produced `pending_approval`.
 
-All three AI commands call Station's governed LLM entry point; the handler does not send a direct HTTP request to Groq.
+`_api_key()` resolves the Stripe credential from the local Station vault at execution time. The secret is used only for the Stripe `Authorization` header and is not included in command inputs, payload hashes, normal results, or receipts.
 
-| Check | Status | Result |
-|---|---|---|
-| Commands are `read` / `side_effects: none` | ✅ Verified | Manifest classification matches all three handlers. |
-| `decision_support_only` | 🧪 Fixture Only | Valid fixture results add `decision_support_only: true` and a human-review note. |
-| Structured JSON required | 🧪 Fixture Only | Non-JSON and non-object replies return `invalid_ai_response`. |
-| Required fields and enums | 🧪 Fixture Only | Missing fields and invalid enum values are rejected. |
-| Integer ranges | 🧪 Fixture Only | Risk score, wait days, counts, and money metrics reject booleans, floats, and out-of-range integers. |
-| Array bounds and item types | 🧪 Fixture Only | Drivers, anomalies, and review order enforce length and type constraints. |
-| Opaque anomaly references | 🧪 Fixture Only | Unknown, repeated, email-like, `cus_`, and `in_` references are rejected. |
-| PII minimization | ✅ Verified | Prompts are assembled only from minimized aggregates or opaque references. |
-| Live Groq response and egress receipt | ⚠ Blocked by Station | Provider execution stops at the Station v0.55 DNS sandbox issue; not marked passed. |
+Stripe writes derive their `Idempotency-Key` from `airlock_payload_hash()`. The same approved payload retains the same effect identity; a changed payload changes the approval/hash binding. Missing idempotency support fails hard before an unprotected write. Idempotency is not automatic rollback.
 
-## Sandbox verification
+Money inputs use strict integer cents. Boolean, float, fractional, zero where positive values are required, and negative inputs are rejected before provider execution.
 
-| Check | Status | Result |
-|---|---|---|
-| Manifest capability shape | ✅ Verified | `requires.network`, `requires.subprocess`, and `requires.filesystem_writes` match Station v0.55's manifest shape. |
-| Off-allowlist network destination | ✅ Verified | Denied by sandbox policy. |
-| Subprocess execution | ✅ Verified | Not granted by the manifest. |
-| Filesystem writes | ✅ Verified | No writable filesystem capability is requested. |
-| Allowed Stripe and Groq hostname execution | ⚠ Blocked by Station | The hostname is allowed, but Station resolves it to an IP and then rejects the IP because it is not a hostname entry in the allowlist. |
+## Runtime receipts
 
-## Signature verification
+The completed module runtime produced 32 signed receipts:
 
-Station accepted the v1.2.5 module only after verifying its manifest v2/tree signature and signed file set. This provider-independent verification passed. Provider execution failure does not invalidate the module signature.
+- 8 `executed`;
+- 10 honest failures;
+- 13 `pending_approval`;
+- 1 `blocked_by_policy`.
 
-## Known Station blocker
+Payload-hash, integrity-hash, signature verification, and secret-leak checks passed. Actual normal Stripe `invoice_list` read compatibility was demonstrated. Provider success is claimed only where an actual provider receipt or effect supports it; fixture-only AI evidence is not labeled as live Groq success.
 
-Live provider execution currently stops in RailCall Station v0.55 after DNS resolution:
+## Sandbox and capabilities
 
-1. The manifest permits `api.stripe.com` and `api.groq.com`.
-2. The sandbox resolves the hostname to an IP address.
-3. The runtime compares the resolved IP with the hostname allowlist.
-4. The IP is rejected even though its originating hostname is allowed.
+The final manifest requests only:
 
-This is recorded as **⚠ Blocked by Station**, not as a module failure and not as a Stripe or Groq pass. No fixture was substituted to claim a live end-to-end provider success.
+```json
+{
+  "network": ["api.stripe.com", "api.groq.com"],
+  "subprocess": false,
+  "filesystem_writes": []
+}
+```
 
-## Step 3 conclusion
+Off-allowlist network access is denied. The handler receives no subprocess or filesystem-write capability. All 29 action IDs are unique, and Station v0.66 rejects action-ID collisions rather than silently overwriting a registration.
 
-- Manifest, registration, classification, approval boundaries, strict validation, idempotency failure behavior, signature, and sandbox declarations are ✅ verified.
-- All 28 commands have provider-independent fixture coverage, clearly marked 🧪 Fixture Only.
-- Current live Stripe and Groq provider completion remains ⚠ blocked by Station v0.55.
-- No secret, credential, approval token, or live provider identifier is included in this report.
+## Known limitations
+
+- Live Groq completion remains unverified and must not be inferred from fixture or source evidence.
+- The incremental/schedulable capability badge may not render consistently even though parser, injection, execution, and settlement behavior passed.
+- Receipt-persistence failure in Station v0.66 surfaces `ok: false`, preserves staging, and reports the error, but the response may still contain `executed: true`; do not claim otherwise.
+- Stripe usage aggregation is asynchronous, so `usage_summary_list` can lag after usage is recorded.
+
+## Conclusion
+
+Module v1.3.0 is final for Station v0.66: exactly 29 registered commands, 13 approval-controlled writes, incremental and schedulable `invoice_list`, privacy-hardened structured dunning drafting, strict validation, local-vault credential handling, approval-derived idempotency, required receipts, and signature tree v2. No module source migration was required for Station v0.66.
