@@ -1,4 +1,4 @@
-"""dave/stripe-invoicing v1.3.0 - governed Stripe receivables.
+"""dave/stripe-invoicing v1.4.0 - governed Stripe receivables.
 
 Vault entry `stripe` in keys.local.json:
     { "STRIPE_SECRET_KEY": "sk_test_..." }
@@ -7,7 +7,7 @@ The key never leaves this machine. It is read through vault_get at call time
 and injected as an Authorization header only, so it never lands in the request
 body and never becomes part of the airlock payload hash or the signed receipt.
 
-Twenty-nine commands: sixteen read-only operations, thirteen airlock-gated
+Thirty-two commands: nineteen read-only operations, thirteen airlock-gated
 writes, and four governed AI decision-support commands. Billing behavior is
 kept separate from AI: AI can recommend review priorities but cannot charge,
 send, or alter Stripe.
@@ -34,6 +34,7 @@ Design notes worth knowing before you edit this file:
 
 import json as _json
 import datetime as _datetime
+import time
 import urllib.parse as _urlparse
 
 STRIPE_API = "https://api.stripe.com/v1"
@@ -195,6 +196,80 @@ def _need_str(inputs, field, hint=""):
     return value.strip()
 
 
+def _email(inputs, field="email"):
+    """Return one canonical lookup/create email without changing its meaning."""
+    value = _need_str(inputs, field).lower()
+    if len(value) > 254 or value.count("@") != 1 or any(ch.isspace() for ch in value):
+        raise RuntimeError(field + " must be a valid email address")
+    local, domain = value.split("@", 1)
+    if not local or not domain or domain.startswith(".") or domain.endswith("."):
+        raise RuntimeError(field + " must be a valid email address")
+    return value
+
+
+def _currency(inputs, field="currency", default="usd"):
+    value = str(inputs.get(field) or default).strip().lower()
+    if len(value) != 3 or not value.isalpha():
+        raise RuntimeError(field + " must be a three-letter alphabetic code")
+    return value
+
+
+def _billing_run_id(inputs, required=False):
+    value = inputs.get("billing_run_id")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if required:
+            raise RuntimeError("billing_run_id is required for workflow-correlated billing")
+        return ""
+    if not isinstance(value, str):
+        raise RuntimeError("billing_run_id must be a string")
+    value = value.strip()
+    if len(value) > 120 or not value[0].isalnum() or any(
+        ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-"
+        for ch in value
+    ):
+        raise RuntimeError("billing_run_id has an invalid safe metadata shape")
+    return value
+
+
+def _metadata_fields(inputs, billing_run_id=""):
+    """Validate caller metadata and add correlation without overwriting it."""
+    metadata = inputs.get("metadata")
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict) or len(metadata) > 50:
+        raise RuntimeError("metadata must be an object with at most 50 entries")
+    fields = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not key.strip() or len(key.strip()) > 40:
+            raise RuntimeError("metadata keys must be non-empty strings up to 40 characters")
+        key = key.strip()
+        lowered = key.lower()
+        if any(word in lowered for word in ("secret", "password", "token", "api_key", "private_key")):
+            raise RuntimeError("metadata keys must not contain secret material")
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise RuntimeError("metadata values must be scalar strings or numbers")
+        text = str(value)
+        if len(text) > 500 or any(ord(ch) < 32 for ch in text):
+            raise RuntimeError("metadata values must be printable and at most 500 characters")
+        fields["metadata[" + key + "]"] = text
+    if billing_run_id:
+        existing = metadata.get("billing_run_id")
+        if existing is not None and str(existing) != billing_run_id:
+            raise RuntimeError("metadata.billing_run_id cannot conflict with billing_run_id")
+        fields.setdefault("metadata[billing_run_id]", billing_run_id)
+    return fields
+
+
+def _bill_client_failure(stage, states, exc):
+    """Keep an ambiguous provider outcome visible in the command error."""
+    states[stage]["state"] = "unknown"
+    snapshot = {key: dict(value) for key, value in states.items()}
+    raise RuntimeError(
+        "bill_client has an unresolved provider outcome; do not recreate blindly. "
+        + _json.dumps({"stages": snapshot, "error": str(exc)}, sort_keys=True)
+    )
+
+
 def _whole_int(value, field, minimum=None):
     """Accept integer values (or legacy integer strings), never truncate floats.
 
@@ -216,6 +291,19 @@ def _whole_int(value, field, minimum=None):
         raise RuntimeError(field + " must be a whole number")
     if minimum is not None and number < minimum:
         raise RuntimeError(field + " must be at least " + str(minimum))
+    return number
+
+
+def _number(value, field):
+    """Parse a finite numeric field without treating booleans as numbers."""
+    if isinstance(value, bool):
+        raise RuntimeError(field + " must be a number")
+    try:
+        number = float(value) if isinstance(value, (int, float, str)) else None
+    except (TypeError, ValueError):
+        number = None
+    if number is None or number != number or number in (float("inf"), float("-inf")):
+        raise RuntimeError(field + " must be a number")
     return number
 
 
@@ -293,9 +381,7 @@ def _dashboard(kind, object_id, key):
 # ----------------------------------------------------------------------- read
 
 def stripe_billing_customer_find(inputs, stamp):
-    email = _need_str(inputs, "email")
-    if "@" not in email:
-        raise RuntimeError("email must contain '@'")
+    email = _email(inputs)
 
     status, parsed = _call(
         "GET", "/customers", {"email": email, "limit": _clamp_limit(inputs)}
@@ -369,7 +455,10 @@ def stripe_billing_invoice_list(inputs, stamp):
             # Defensive provider-boundary check: never trust a remote filter to
             # satisfy the incremental contract on its own.
             continue
-        due = row.get("amount_due") or 0
+        try:
+            due = _whole_int(row.get("amount_due") or 0, "Stripe amount_due", 0)
+        except RuntimeError:
+            raise RuntimeError("Stripe invoice response contains an invalid amount_due")
         currency = row.get("currency") or "usd"
         if row.get("status") == "open":
             outstanding += due
@@ -469,9 +558,7 @@ def stripe_billing_subscription_list(inputs, stamp):
 # ---------------------------------------------------------------------- write
 
 def stripe_billing_customer_create(inputs, stamp):
-    email = _need_str(inputs, "email")
-    if "@" not in email:
-        raise RuntimeError("email must contain '@'")
+    email = _email(inputs)
 
     form = {"email": email}
     for field in ("name", "description", "phone"):
@@ -517,7 +604,7 @@ def stripe_billing_invoice_create(inputs, stamp):
             '[{"description": "Design work", "amount_cents": 25000}]'
         )
 
-    currency = str(inputs.get("currency") or "usd").strip().lower()
+    currency = _currency(inputs)
 
     # Validate the whole batch before creating anything. A half-built invoice
     # with three of five items attached is worse than a clean refusal.
@@ -545,11 +632,9 @@ def stripe_billing_invoice_create(inputs, stamp):
             quantity = 1
         else:
             try:
-                quantity = int(raw_quantity)
-            except Exception:
+                quantity = _whole_int(raw_quantity, where + ".quantity", 1)
+            except RuntimeError:
                 raise RuntimeError(where + ".quantity must be a whole number")
-        if quantity <= 0:
-            raise RuntimeError(where + ".quantity must be greater than zero")
         cleaned.append({
             "description": description.strip(),
             "amount": amount,
@@ -564,11 +649,9 @@ def stripe_billing_invoice_create(inputs, stamp):
         # Same trap as quantity: days_until_due=0 means due on issue, not "use
         # the default 30 days".
         try:
-            days = int(raw_due)
-        except Exception:
+            days = _whole_int(raw_due, "days_until_due", 0)
+        except RuntimeError:
             raise RuntimeError("days_until_due must be a whole number of days")
-        if days < 0:
-            raise RuntimeError("days_until_due cannot be negative")
         form["days_until_due"] = str(days)
 
     description = inputs.get("description")
@@ -838,102 +921,302 @@ def stripe_billing_aging_report(inputs, stamp):
 
 
 def stripe_billing_bill_client(inputs, stamp):
-    """Find or create the customer, draft a one-line invoice, finalize and
-    send it. One approval for the whole chain: the single command a solo
-    consultant actually touches on a normal day.
+    """Find/create, invoice, attach one item, finalize and send.
 
-    Self-contained rather than sharing code with invoice_create, deliberately:
-    invoice_create's behaviour is frozen for v1.1, so this does not touch it.
+    Each stage is reported separately. If a provider call is ambiguous, the
+    exception carries the last-known stage snapshot and explicitly marks the
+    uncertain stage ``unknown``; callers must reconcile by provider id before
+    retrying. Idempotency scopes remain bound to the approved payload.
     """
-    email = _need_str(inputs, "email")
-    if "@" not in email:
-        raise RuntimeError("email must contain '@'")
+    email = _email(inputs)
     description = _need_str(inputs, "description")
     try:
-        amount = _whole_int(inputs.get("amount_cents"), "amount_cents")
-    except Exception:
+        amount = _whole_int(inputs.get("amount_cents"), "amount_cents", 1)
+    except RuntimeError:
         raise RuntimeError(
-            "amount_cents must be a whole number of cents. 250.00 dollars is 25000."
+            "amount_cents must be a positive whole number of cents. 250.00 dollars is 25000."
         )
-    if amount <= 0:
-        raise RuntimeError("amount_cents must be greater than zero")
-    currency = str(inputs.get("currency") or "usd").strip().lower()
-
+    currency = _currency(inputs)
+    billing_run_id = _billing_run_id(inputs)
+    metadata = _metadata_fields(inputs, billing_run_id)
     raw_due = inputs.get("days_until_due")
-    if raw_due is None:
-        days_form = "30"
-    else:
-        try:
-            days = int(raw_due)
-        except Exception:
-            raise RuntimeError("days_until_due must be a whole number of days")
-        if days < 0:
-            raise RuntimeError("days_until_due cannot be negative")
-        days_form = str(days)
-
-    _, found = _call("GET", "/customers", {"email": email, "limit": 5})
-    rows = found.get("data") or []
-    customer_id = ""
-    for row in rows:
-        if isinstance(row.get("id"), str):
-            customer_id = row["id"]
-            break
+    try:
+        days = 30 if raw_due is None else _whole_int(raw_due, "days_until_due", 0)
+    except RuntimeError:
+        raise RuntimeError("days_until_due must be a non-negative whole number of days")
+    states = {
+        "customer": {"state": "unknown", "customer_id": ""},
+        "invoice": {"state": "unknown", "invoice_id": ""},
+        "line_items": {"state": "unknown", "attached_count": 0, "expected_count": 1},
+        "finalized": {"state": "unknown", "invoice_id": ""},
+        "sent": {"state": "unknown", "invoice_id": ""},
+    }
 
     customer_created = False
-    if not customer_id:
-        form = {"email": email}
-        name = inputs.get("name")
-        if isinstance(name, str) and name.strip():
-            form["name"] = name.strip()
-        _, parsed = _call(
-            "POST", "/customers", form,
-            idem_for="stripe.billing.bill_client.customer", inputs=inputs, stamp=stamp,
+    supplied_customer_id = inputs.get("customer_id")
+    if supplied_customer_id is not None:
+        customer_id = _need_str(inputs, "customer_id", "Stripe customer ids start with cus_")
+        if not customer_id.startswith("cus_"):
+            raise RuntimeError("customer_id must be a Stripe cus_ id")
+        states["customer"] = {"state": "existing", "customer_id": customer_id}
+    else:
+        try:
+            _, found = _call("GET", "/customers", {"email": email, "limit": 5})
+        except Exception as exc:
+            _bill_client_failure("customer", states, exc)
+        rows = found.get("data") or []
+        customer_id = ""
+        for row in rows:
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"].strip():
+                customer_id = row["id"].strip()
+                break
+        if customer_id:
+            states["customer"] = {"state": "existing", "customer_id": customer_id}
+        else:
+            form = {"email": email}
+            name = inputs.get("name")
+            if isinstance(name, str) and name.strip():
+                form["name"] = name.strip()
+            form.update(metadata)
+            try:
+                _, parsed = _call(
+                    "POST", "/customers", form,
+                    idem_for="stripe.billing.bill_client.customer", inputs=inputs, stamp=stamp,
+                )
+            except Exception as exc:
+                _bill_client_failure("customer", states, exc)
+            customer_id = parsed.get("id") or ""
+            if not isinstance(customer_id, str) or not customer_id.strip():
+                _bill_client_failure("customer", states, RuntimeError("Stripe returned no customer id"))
+            customer_id = customer_id.strip()
+            customer_created = True
+            states["customer"] = {"state": "created", "customer_id": customer_id}
+
+    invoice_form = {
+        "customer": customer_id,
+        "collection_method": "send_invoice",
+        "days_until_due": str(days),
+        "description": description,
+    }
+    invoice_form.update(metadata)
+    try:
+        _, invoice = _call(
+            "POST", "/invoices", invoice_form,
+            idem_for="stripe.billing.bill_client.invoice", inputs=inputs, stamp=stamp,
         )
-        customer_id = parsed.get("id") or ""
-        customer_created = True
-        if not customer_id:
-            raise RuntimeError("Stripe did not return a customer id for the new customer")
-
-    invoice_form = {"customer": customer_id, "collection_method": "send_invoice",
-                    "days_until_due": days_form, "description": description}
-    _, invoice = _call(
-        "POST", "/invoices", invoice_form,
-        idem_for="stripe.billing.bill_client.invoice", inputs=inputs, stamp=stamp,
-    )
+    except Exception as exc:
+        _bill_client_failure("invoice", states, exc)
     invoice_id = invoice.get("id") or ""
+    if not isinstance(invoice_id, str) or not invoice_id.strip():
+        _bill_client_failure("invoice", states, RuntimeError("Stripe returned no invoice id"))
+    invoice_id = invoice_id.strip()
+    states["invoice"] = {"state": "created", "invoice_id": invoice_id}
 
-    _call(
-        "POST", "/invoiceitems",
-        {
-            "customer": customer_id,
-            "invoice": invoice_id,
-            "description": description,
-            "amount": str(amount),
-            "currency": currency,
-        },
-        idem_for="stripe.billing.bill_client.item", inputs=inputs, stamp=stamp,
-    )
+    try:
+        _, item = _call(
+            "POST", "/invoiceitems",
+            {
+                "customer": customer_id,
+                "invoice": invoice_id,
+                "description": description,
+                "amount": str(amount),
+                "currency": currency,
+                **metadata,
+            },
+            idem_for="stripe.billing.bill_client.item", inputs=inputs, stamp=stamp,
+        )
+    except Exception as exc:
+        _bill_client_failure("line_items", states, exc)
+    item_id = item.get("id") if isinstance(item, dict) else ""
+    if not isinstance(item_id, str) or not item_id.strip():
+        _bill_client_failure("line_items", states, RuntimeError("Stripe returned no invoice item id"))
+    states["line_items"] = {"state": "attached", "attached_count": 1, "expected_count": 1,
+                             "line_item_id": item_id.strip()}
 
-    # Freshly created within this same call, so it is always draft; no need
-    # to re-check state the way invoice_send does for an id an operator
-    # could hand in stale. The send response itself carries the final totals.
-    status, sent = _call(
-        "POST", "/invoices/" + invoice_id + "/send", {},
-        idem_for="stripe.billing.bill_client.send", inputs=inputs, stamp=stamp,
-    )
+    try:
+        status, sent = _call(
+            "POST", "/invoices/" + invoice_id + "/send", {},
+            idem_for="stripe.billing.bill_client.send", inputs=inputs, stamp=stamp,
+        )
+    except Exception as exc:
+        states["sent"] = {"state": "unknown", "invoice_id": invoice_id}
+        states["finalized"] = {"state": "unknown", "invoice_id": invoice_id}
+        _bill_client_failure("sent", states, exc)
+    sent_id = sent.get("id") or invoice_id
+    if not isinstance(sent_id, str) or not sent_id.strip():
+        _bill_client_failure("sent", states, RuntimeError("Stripe returned no sent invoice id"))
+    sent_id = sent_id.strip()
+    states["finalized"] = {"state": True, "invoice_id": sent_id}
+    states["sent"] = {"state": True, "invoice_id": sent_id}
     sent_currency = sent.get("currency") or currency
     return {
         "ok": True,
         "loaded_from": "module:dave/stripe-invoicing",
         "http_status": status,
+        "billing_run_id": billing_run_id,
+        "email_normalized": email,
         "customer_id": customer_id,
         "customer_created": customer_created,
-        "invoice_id": sent.get("id") or invoice_id,
+        "invoice_id": sent_id,
         "status_at_stripe": sent.get("status"),
         "amount_due": _money(sent.get("amount_due") or 0, sent_currency),
         "sent_to": sent.get("customer_email") or email,
         "hosted_invoice_url": sent.get("hosted_invoice_url") or "",
         "dashboard_url": _dashboard("invoices", invoice_id, _api_key()) if invoice_id else "",
+        "stages": states,
+        "correlation": {"billing_run_id": billing_run_id, "invoice_id": sent_id,
+                        "customer_id": customer_id, "line_item_count": 1},
+    }, None
+
+
+def stripe_billing_invoice_preview(inputs, stamp):
+    """Compute a local invoice plan; this command never calls Stripe."""
+    description = inputs.get("description")
+    if not isinstance(description, str) or not description.strip():
+        description = "Invoice preview"
+    else:
+        description = description.strip()
+    currency = _currency(inputs)
+    billing_run_id = _billing_run_id(inputs)
+    _metadata_fields(inputs, billing_run_id)
+    raw_items = inputs.get("line_items")
+    if raw_items is None:
+        raw_items = [{"description": description, "amount_cents": inputs.get("amount_cents"), "quantity": 1}]
+    if not isinstance(raw_items, list) or not raw_items:
+        raise RuntimeError("line_items must be a non-empty array")
+    cleaned = []
+    total = 0
+    for index, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            raise RuntimeError("line_items[" + str(index) + "] must be an object")
+        label = _need_str(item, "description")
+        amount = _whole_int(item.get("amount_cents"), "line_items[" + str(index) + "].amount_cents", 1)
+        quantity = _whole_int(item.get("quantity", 1), "line_items[" + str(index) + "].quantity", 1)
+        line_total = amount * quantity
+        total += line_total
+        cleaned.append({"description": label, "amount_cents": amount,
+                        "quantity": quantity, "line_total_cents": line_total})
+    raw_due = inputs.get("days_until_due")
+    days = 30 if raw_due is None else _whole_int(raw_due, "days_until_due", 0)
+    customer_id = inputs.get("customer_id")
+    if customer_id is not None and (not isinstance(customer_id, str) or not customer_id.strip()):
+        raise RuntimeError("customer_id must be a non-empty string when supplied")
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "dry_run": True,
+        "preview_only": True,
+        "external_effect": False,
+        "billing_run_id": billing_run_id,
+        "customer_id": customer_id.strip() if isinstance(customer_id, str) else "",
+        "email_normalized": _email(inputs) if inputs.get("email") is not None else "",
+        "description": description,
+        "currency": currency,
+        "days_until_due": days,
+        "line_items": cleaned,
+        "line_item_count": len(cleaned),
+        "subtotal_cents": total,
+        "total_cents": total,
+        "amount_due_cents": total,
+        "note": "Local preview only; Stripe customer, invoice, finalization, and delivery were not touched.",
+    }, None
+
+
+def _invoice_status_row(row, now):
+    if not isinstance(row, dict):
+        raise RuntimeError("Stripe invoice response contains a non-object")
+    invoice_id = row.get("id")
+    if not isinstance(invoice_id, str) or not invoice_id.strip():
+        raise RuntimeError("Stripe invoice response is missing a stable invoice id")
+    due = _whole_int(row.get("amount_due") or 0, "Stripe amount_due", 0)
+    paid = _whole_int(row.get("amount_paid") or 0, "Stripe amount_paid", 0)
+    remaining = _whole_int(row.get("amount_remaining") if row.get("amount_remaining") is not None else max(0, due - paid), "Stripe amount_remaining", 0)
+    due_date = row.get("due_date")
+    overdue = bool(row.get("status") == "open" and isinstance(due_date, (int, float)) and due_date < now)
+    days_overdue = int((now - due_date) // 86400) if overdue else 0
+    if row.get("status") == "paid":
+        normalized = "paid"
+    elif remaining > 0 and paid > 0:
+        normalized = "partially_paid"
+    elif overdue:
+        normalized = "overdue"
+    else:
+        normalized = str(row.get("status") or "unknown")
+    return {
+        "invoice_id": invoice_id.strip(),
+        "status": normalized,
+        "stripe_status": row.get("status") or "unknown",
+        "currency": row.get("currency") or "usd",
+        "amount_due_cents": due,
+        "amount_paid_cents": paid,
+        "amount_remaining_cents": remaining,
+        "due_date": due_date,
+        "overdue": overdue,
+        "days_overdue": days_overdue,
+    }
+
+
+def stripe_billing_payment_status_summary(inputs, stamp):
+    """Read invoice payment states and normalize overdue/partial exposure."""
+    invoice_id = inputs.get("invoice_id")
+    customer_id = inputs.get("customer_id")
+    if invoice_id is not None:
+        invoice_id = _need_str(inputs, "invoice_id")
+    elif customer_id is not None:
+        customer_id = _need_str(inputs, "customer_id")
+    else:
+        raise RuntimeError("invoice_id or customer_id is required")
+    now = time.time()  # noqa: F821 -- pre-injected per the module loader
+    if invoice_id:
+        status, row = _call("GET", "/invoices/" + invoice_id)
+        rows = [row]
+    else:
+        status, parsed = _call("GET", "/invoices", {"customer": customer_id, "limit": _clamp_limit(inputs, 100)})
+        rows = parsed.get("data") or []
+    invoices = [_invoice_status_row(row, now) for row in rows]
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "customer_id": customer_id or "",
+        "invoice_id": invoice_id or "",
+        "invoice_count": len(invoices),
+        "invoices": invoices,
+        "open_amount_remaining_cents": sum(x["amount_remaining_cents"] for x in invoices if x["stripe_status"] == "open"),
+        "overdue_count": len([x for x in invoices if x["overdue"]]),
+        "partial_count": len([x for x in invoices if x["status"] == "partially_paid"]),
+    }, None
+
+
+def stripe_billing_customer_balance_summary(inputs, stamp):
+    """Read provider balance plus invoice/subscription exposure for one customer."""
+    customer_id = _need_str(inputs, "customer_id", "Stripe customer ids start with cus_")
+    status, customer = _call("GET", "/customers/" + customer_id)
+    _, invoices = _call("GET", "/invoices", {"customer": customer_id, "limit": 100})
+    _, subscriptions = _call("GET", "/subscriptions", {"customer": customer_id, "status": "all", "limit": 100})
+    rows = invoices.get("data") or []
+    now = time.time()  # noqa: F821 -- pre-injected per the module loader
+    states = [_invoice_status_row(row, now) for row in rows]
+    currency = (rows[0].get("currency") if rows else "usd")
+    outstanding = sum(x["amount_remaining_cents"] for x in states if x["stripe_status"] in ("open", "uncollectible"))
+    overdue = sum(x["amount_remaining_cents"] for x in states if x["overdue"])
+    lifetime_paid = sum(x["amount_paid_cents"] for x in states if x["stripe_status"] == "paid")
+    provider_balance = _whole_int(customer.get("balance") or 0, "Stripe customer balance")
+    return {
+        "ok": True,
+        "loaded_from": "module:dave/stripe-invoicing",
+        "http_status": status,
+        "customer_id": customer.get("id") or customer_id,
+        "email": customer.get("email") or "",
+        "currency": currency,
+        "provider_balance_cents": provider_balance,
+        "provider_balance": _money(provider_balance, currency),
+        "open_or_uncollectible_remaining_cents": outstanding,
+        "overdue_remaining_cents": overdue,
+        "lifetime_paid_cents": lifetime_paid,
+        "invoice_count": len(states),
+        "active_subscription_count": len([x for x in subscriptions.get("data") or [] if x.get("status") in ("active", "trialing", "past_due")]),
+        "note": "Provider balance and invoice exposure are read separately; Stripe aggregation and pagination limits apply.",
     }, None
 
 
@@ -1118,20 +1401,17 @@ def stripe_billing_coupon_create(inputs, stamp):
         raise RuntimeError("duration must be one of: " + ", ".join(allowed_durations))
     if form["duration"] == "repeating":
         try:
-            months = int(inputs.get("duration_in_months"))
-        except Exception:
+            months = _whole_int(inputs.get("duration_in_months"), "duration_in_months", 1)
+        except RuntimeError:
             raise RuntimeError("duration_in_months is required and must be a whole number when duration is repeating")
-        if months <= 0:
-            raise RuntimeError("duration_in_months must be greater than zero")
         form["duration_in_months"] = str(months)
 
     if percent_off is not None:
-        try:
-            pct = float(percent_off)
-        except Exception:
-            raise RuntimeError("percent_off must be a number")
-        if not (0 < pct <= 100):
-            raise RuntimeError("percent_off must be greater than 0 and at most 100")
+        pct = _number(percent_off, "percent_off")
+        if pct <= 0:
+            raise RuntimeError("percent_off must be greater than zero")
+        if pct > 100:
+            raise RuntimeError("percent_off must be at most 100")
         form["percent_off"] = str(pct)
         currency = "usd"
     else:
@@ -1141,7 +1421,7 @@ def stripe_billing_coupon_create(inputs, stamp):
             raise RuntimeError("amount_cents_off must be a whole number of cents")
         if cents <= 0:
             raise RuntimeError("amount_cents_off must be greater than zero")
-        currency = str(inputs.get("currency") or "usd").strip().lower()
+        currency = _currency(inputs)
         form["amount_off"] = str(cents)
         form["currency"] = currency
 
@@ -1182,11 +1462,9 @@ def stripe_billing_promotion_code_create(inputs, stamp):
     max_redemptions = inputs.get("max_redemptions")
     if max_redemptions is not None:
         try:
-            n = int(max_redemptions)
-        except Exception:
+            n = _whole_int(max_redemptions, "max_redemptions", 1)
+        except RuntimeError:
             raise RuntimeError("max_redemptions must be a whole number")
-        if n <= 0:
-            raise RuntimeError("max_redemptions must be greater than zero")
         form["max_redemptions"] = str(n)
 
     status, parsed = _call(
@@ -1259,7 +1537,7 @@ def stripe_billing_price_create(inputs, stamp):
         raise RuntimeError("unit_amount_cents must be a whole number of cents")
     if amount <= 0:
         raise RuntimeError("unit_amount_cents must be greater than zero")
-    currency = str(inputs.get("currency") or "usd").strip().lower()
+    currency = _currency(inputs)
 
     interval = inputs.get("interval")
     if isinstance(interval, str) and interval.strip():
@@ -1350,11 +1628,9 @@ def stripe_billing_usage_record_create(inputs, stamp):
     if raw_value is None:
         raise RuntimeError("value is required, and may be 0 to record zero usage")
     try:
-        value = float(raw_value)
-    except Exception:
-        raise RuntimeError("value must be a number")
-    if value < 0:
-        raise RuntimeError("value cannot be negative")
+        value = _whole_int(raw_value, "value", 0)
+    except RuntimeError:
+        raise RuntimeError("value must be a non-negative whole number")
 
     _, meter = _call("GET", "/billing/meters/" + meter_id)
     event_name = meter.get("event_name")
@@ -1397,8 +1673,10 @@ def stripe_billing_usage_summary_list(inputs, stamp):
     end_time = inputs.get("end_time")
     start_time = inputs.get("start_time")
     now = int(time.time())  # noqa: F821 -- pre-injected per the module loader
-    end_val = int(end_time) if end_time is not None else now
-    start_val = int(start_time) if start_time is not None else end_val - 86400
+    end_val = _whole_int(end_time, "end_time", 0) if end_time is not None else now
+    start_val = _whole_int(start_time, "start_time", 0) if start_time is not None else end_val - 86400
+    if start_val >= end_val:
+        raise RuntimeError("start_time must be earlier than end_time")
 
     status, parsed = _call(
         "GET", "/billing/meters/" + meter_id + "/event_summaries",
@@ -1455,7 +1733,7 @@ def _llm_complete(messages, step_id="legacy_ai_command"):
             messages,
             provider="groq",
             module_id="dave/stripe-invoicing",
-            module_version="v1.3.0",
+            module_version="v1.4.0",
             step_id=step_id,
             caller_kind="module",
         )
@@ -1531,7 +1809,7 @@ def stripe_billing_dunning_message_draft(inputs, stamp):
     days_overdue = _whole_int(inputs.get("days_overdue"), "days_overdue", 0)
     tone = str(inputs.get("tone") or "polite").strip().lower()
     sender_name = str(inputs.get("sender_name") or "Billing Team").strip()
-    currency = str(inputs.get("currency") or "usd").strip().lower()
+    currency = _currency(inputs)
 
     if tone not in ("polite", "firm", "urgent"):
         raise RuntimeError("tone must be one of: polite, firm, urgent")
@@ -1803,11 +2081,50 @@ def stripe_billing_collection_strategy_recommend(inputs, stamp):
         "dispute_open": _metric(inputs, "dispute_open", required=False),
         "payment_commitment_present": _metric(inputs, "payment_commitment_present", required=False),
     }
-    reply, receipt_id = _llm_complete([
-        {"role": "system", "content": "You are a conservative collections operations advisor. Recommend a human-reviewed next step only; never draft or send a message, never promise legal action, and never decide automatically. Return strict JSON with urgency (low|medium|high), recommended_action (string), wait_days (0-30 integer), escalation_needed (yes|no), and rationale (max 2 sentences)."},
-        {"role": "user", "content": "Minimised collections facts with no customer, invoice, email, or account identifiers: " + _json.dumps(facts, sort_keys=True, separators=(",", ":"))},
-    ], "collection_strategy_recommend")
-    return _decision_result(_validate_strategy_response(_decision_json(reply, "collection_strategy_recommend")), receipt_id)
+    messages = [
+        {"role": "system", "content": (
+            "You are a conservative collections operations advisor. Recommend "
+            "a human-reviewed next step only; never draft or send a message, "
+            "never promise legal action, and never decide automatically. "
+            "OUTPUT CONTRACT: respond with exactly one JSON object and no other "
+            "text, markdown, code fence, or commentary. The object must contain "
+            "exactly these fields: urgency (one of low, medium, high), "
+            "recommended_action (string), wait_days (integer 0 through 30), "
+            "escalation_needed (yes or no), and rationale (string, at most two "
+            "sentences). Begin with { and end with }."
+        )},
+        {"role": "user", "content": (
+            "Minimised collections facts with no customer, invoice, email, or "
+            "account identifiers. Return only the JSON object described above: "
+            + _json.dumps(facts, sort_keys=True, separators=(",", ":"))
+        )},
+    ]
+    reply, receipt_id = _llm_complete(messages, "collection_strategy_recommend")
+    try:
+        parsed = _decision_json(reply, "collection_strategy_recommend")
+    except RuntimeError as first_error:
+        # groq_chat prepends Studio's general assistant prompt and does not
+        # expose a native response_format option. A single governed correction
+        # call makes the JSON contract reliable without accepting prose or
+        # weakening the validator. Any second failure remains fail-closed.
+        retry_messages = [
+            {"role": "system", "content": (
+                "The previous response was rejected because it was not a JSON "
+                "object. Retry now. Return ONLY one compact JSON object with "
+                "exactly: urgency, recommended_action, wait_days, "
+                "escalation_needed, rationale. No prose, markdown, or code fences."
+            )},
+            messages[1],
+        ]
+        retry_reply, retry_receipt_id = _llm_complete(
+            retry_messages, "collection_strategy_recommend_retry"
+        )
+        try:
+            parsed = _decision_json(retry_reply, "collection_strategy_recommend")
+        except RuntimeError:
+            raise first_error
+        receipt_id = retry_receipt_id
+    return _decision_result(_validate_strategy_response(parsed), receipt_id)
 
 
 def stripe_billing_billing_anomaly_detect(inputs, stamp):

@@ -1,13 +1,13 @@
 {
   "id": "dave/stripe-invoicing",
   "name": "Stripe Invoicing for RailCall",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "publisher_pubkey": "1f8c4489a0c417d6cbd9ac9b091fbf3df54e09b8af26105686f41364d4a72902",
   "provider": "stripe",
   "category": "Finance",
   "homepage": "https://davelab10.github.io/portofolio/",
   "tests_url": "https://github.com/davelab10/railcall-stripe-invoicing/blob/main/TESTING.md",
-  "description": "Governed Stripe accounts receivable for RailCall Station. The module exposes 29 commands under stripe.billing.*: 16 read commands and 13 approval-controlled writes that stop at the Station airlock before any external mutation.\n\nBILLING AND COLLECTIONS\nbill_client is the composite monthly-billing path: find or create a customer, prepare an invoice and line item, finalize, and send behind one human approval. invoice_list remains backward compatible for manual use and now declares Station v0.65 incremental and schedulable contracts with provider-ID deduplication, deterministic timestamp watermarks, and explicit truncation.\n\nAI DECISION SUPPORT\npayment_risk_assess evaluates minimized aggregate payment metrics. collection_strategy_recommend returns a human-reviewable collections plan. billing_anomaly_detect reviews anonymized portfolio metrics. dunning_message_draft produces a privacy-minimized, structured draft without sending email or exposing customer/Stripe identifiers to the LLM. All four commands are read-only, structured, fail-closed decision support. AI never authorizes a charge or moves money.\n\nGOVERNANCE\nAll commands require receipts. The sandbox declares only Stripe and Groq network access, no subprocess capability, and no filesystem writes. Existing STRIPE_SECRET_KEY vault entries remain compatible with Station's Configure card and named credentials.\n\nRUNTIME EVIDENCE\nThe v1.3.0 migration targets RailCall Station v0.65. Provider success is claimed only when supported by a real provider receipt; historical runtime limitations from older Station versions are not treated as active v0.65 facts without re-verification.\n\nDemo: https://youtu.be/7wtXK724Kig\n\ncontest:2026Q3",
+  "description": "Governed Stripe accounts receivable for RailCall Station. The module exposes 32 commands under stripe.billing.*: 19 read commands and 13 approval-controlled writes that stop at the Station airlock before any external mutation.\n\nBILLING AND COLLECTIONS\nbill_client is the composite monthly-billing path: normalized customer identity, safe optional billing_run_id metadata, strict financial validation, staged truthful outcomes, invoice item, finalization, and delivery behind one human approval. invoice_preview is local and effect-free. payment_status_summary and customer_balance_summary are read-only operational views.\n\nAI DECISION SUPPORT\npayment_risk_assess evaluates minimized aggregate payment metrics. collection_strategy_recommend returns a human-reviewable collections plan. billing_anomaly_detect reviews anonymized portfolio metrics. dunning_message_draft produces a privacy-minimized, structured draft without sending email or exposing customer/Stripe identifiers to the LLM. All four commands are read-only, structured, fail-closed decision support. AI never authorizes a charge or moves money.\n\nGOVERNANCE\nAll commands require receipts. The sandbox declares only Stripe and Groq network access, no subprocess capability, and no filesystem writes. Existing STRIPE_SECRET_KEY vault entries remain compatible with Station's Configure card and named credentials.\n\nRUNTIME EVIDENCE\nThe v1.4.0 migration remains project-owned and does not patch Station. Provider success is claimed only when supported by a real provider receipt; ambiguous write outcomes remain unknown and retain idempotency.\n\nDemo: https://youtu.be/7wtXK724Kig\n\ncontest:2026Q3",
   "license_required": false,
   "commands": [
     {
@@ -401,6 +401,11 @@
           "type": "string",
           "required": true
         },
+        "customer_id": {
+          "type": "string",
+          "required": false,
+          "description": "Optional exact Stripe customer identity for a prepared billing plan."
+        },
         "description": {
           "type": "string",
           "required": true
@@ -420,9 +425,21 @@
         "days_until_due": {
           "type": "number",
           "required": false
+        },
+        "billing_run_id": {
+          "type": "string",
+          "required": false,
+          "description": "Project-level correlation id; never the Station run_id."
+        },
+        "metadata": {
+          "type": "object",
+          "required": false,
+          "description": "Safe printable Stripe metadata; billing_run_id is added without overwriting caller keys."
         }
       },
       "output_schema": {
+        "billing_run_id": "string",
+        "email_normalized": "string",
         "customer_id": "string",
         "customer_created": "boolean",
         "invoice_id": "string",
@@ -431,7 +448,144 @@
         "sent_to": "string",
         "hosted_invoice_url": "string",
         "dashboard_url": "string",
+        "stages": "object",
+        "correlation": "object",
         "http_status": "number"
+      }
+    },
+    {
+      "id": "stripe.billing.invoice_preview",
+      "title": "Preview an invoice locally without Stripe effects",
+      "provider": "stripe",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "email": {
+          "type": "string",
+          "required": false
+        },
+        "customer_id": {
+          "type": "string",
+          "required": false
+        },
+        "description": {
+          "type": "string",
+          "required": false
+        },
+        "amount_cents": {
+          "type": "number",
+          "required": false
+        },
+        "line_items": {
+          "type": "array",
+          "required": false
+        },
+        "currency": {
+          "type": "string",
+          "required": false
+        },
+        "days_until_due": {
+          "type": "number",
+          "required": false
+        },
+        "billing_run_id": {
+          "type": "string",
+          "required": false
+        },
+        "metadata": {
+          "type": "object",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "preview_only": "boolean",
+        "external_effect": "boolean",
+        "line_items": "array",
+        "subtotal_cents": "number",
+        "total_cents": "number",
+        "billing_run_id": "string",
+        "customer_id": "string",
+        "email_normalized": "string",
+        "description": "string",
+        "currency": "string",
+        "days_until_due": "number",
+        "line_item_count": "number",
+        "amount_due_cents": "number",
+        "note": "string"
+      }
+    },
+    {
+      "id": "stripe.billing.payment_status_summary",
+      "title": "Summarize invoice payment status and overdue exposure",
+      "provider": "stripe",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "invoice_id": {
+          "type": "string",
+          "required": false
+        },
+        "customer_id": {
+          "type": "string",
+          "required": false
+        },
+        "limit": {
+          "type": "number",
+          "required": false
+        }
+      },
+      "output_schema": {
+        "invoice_count": "number",
+        "invoices": "array",
+        "open_amount_remaining_cents": "number",
+        "overdue_count": "number",
+        "partial_count": "number",
+        "http_status": "number",
+        "customer_id": "string",
+        "invoice_id": "string"
+      }
+    },
+    {
+      "id": "stripe.billing.customer_balance_summary",
+      "title": "Summarize customer balance and billing exposure",
+      "provider": "stripe",
+      "risk": "low",
+      "mode": "read",
+      "side_effects": "none",
+      "requires": [
+        "STRIPE_SECRET_KEY"
+      ],
+      "preview": false,
+      "receipt_required": true,
+      "input_schema": {
+        "customer_id": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "output_schema": {
+        "customer_id": "string",
+        "provider_balance_cents": "number",
+        "open_or_uncollectible_remaining_cents": "number",
+        "overdue_remaining_cents": "number",
+        "lifetime_paid_cents": "number",
+        "invoice_count": "number",
+        "active_subscription_count": "number",
+        "http_status": "number",
+        "email": "string",
+        "currency": "string",
+        "provider_balance": "string",
+        "note": "string"
       }
     },
     {
