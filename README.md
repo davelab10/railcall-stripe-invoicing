@@ -6,9 +6,11 @@ Billing automation is useful only when an assistant cannot silently turn a read,
 - **AI** — receive minimized facts and return structured decision support;
 - **MONEY** — prepare Stripe mutations that stop at Approval Airlock until the exact payload is approved.
 
-Current release: **v1.4.0**, with **32 commands** and **13 approval-controlled writes**.
+The practical path is **READ → PREFLIGHT → AI → MONEY**: reads supply provider context, preflight supplies bounded readiness evidence, AI remains advisory, and consequential writes stay behind Approval Airlock.
 
-Demo: https://youtu.be/bFjjwo7R5JU
+Current release: **v1.5.0**, with **34 commands**: **21 read** commands and **13 approval-controlled writes**.
+
+Demo: https://youtu.be/GqG5-EciodI
 
 ## Install and first useful result
 
@@ -18,7 +20,7 @@ Demo: https://youtu.be/bFjjwo7R5JU
    railcall market install dave/stripe-invoicing
    ```
 
-2. Reload Station and open the module in Studio. Confirm that `dave/stripe-invoicing` v1.4.0 is loaded.
+2. Reload Station and open the module in Studio. Confirm that `dave/stripe-invoicing` v1.5.0 is loaded.
 3. In **Studio → Integrations → Stripe**, save a Stripe **TEST** secret in the Station vault. Do not paste a secret into command input.
 4. Run the safe read `stripe.billing.customer_find` with a test-account email:
 
@@ -30,7 +32,24 @@ Demo: https://youtu.be/bFjjwo7R5JU
    ```
 
    The command returns a normal read receipt; it does not mutate Stripe.
-5. For a safe billing preview, use `stripe.billing.invoice_preview`. To request a real mutation, use the same Studio command surface with `stripe.billing.bill_client`:
+5. For bounded billing decision support, run `stripe.billing.account_preflight` with a Stripe customer ID:
+
+   ```json
+   {
+     "customer_id": "cus_test_fixture"
+   }
+   ```
+
+   The result is aggregate readiness evidence. It is not approval and does not authorize a charge. For a provider-backed renewal preview, run `stripe.billing.subscription_renewal_preview`:
+
+   ```json
+   {
+     "customer_id": "cus_test_fixture"
+   }
+   ```
+
+   With one eligible subscription, the handler resolves it and calls Stripe's explicit preview source. With none, multiple, truncated, or incomplete subscriptions, it returns bounded unknown/refusal semantics instead of guessing.
+6. To request a real mutation, use the same Studio command surface with `stripe.billing.bill_client`:
 
    ```json
    {
@@ -43,7 +62,7 @@ Demo: https://youtu.be/bFjjwo7R5JU
    ```
 
    The request must remain pending at Approval Airlock until an operator reviews and approves the exact payload. Use a Stripe TEST account for a first run.
-6. Inspect the signed command receipt from the Studio run/receipt view. It records the decision and integrity evidence without putting the Stripe secret in the receipt.
+7. Inspect the signed command receipt from the Studio run/receipt view. It records the decision and integrity evidence without putting the Stripe secret in the receipt.
 
 The examples describe the input contract. They are not claims that a provider write was executed.
 
@@ -58,6 +77,7 @@ Every command requires a Station receipt. `read` commands have no Stripe side ef
 | `stripe.billing.customer_find` | Find customers by email. |
 | `stripe.billing.customer_summary` | Combine customer profile, open invoices, subscriptions, and lifetime paid totals. |
 | `stripe.billing.customer_balance_summary` | Summarize a customer's balance and billing exposure. |
+| `stripe.billing.account_preflight` | Return bounded, privacy-minimized billing-readiness evidence for planning. |
 | `stripe.billing.payment_method_list` | List saved payment-method brand and last four digits. |
 | `stripe.billing.mandate_get` | Retrieve a mandate; mandate creation is not exposed. |
 
@@ -70,6 +90,7 @@ Every command requires a Station receipt. `read` commands have no Stripe side ef
 | `stripe.billing.subscription_list` | read | List subscriptions for a customer. |
 | `stripe.billing.aging_report` | read | Bucket open invoices by days overdue. |
 | `stripe.billing.invoice_preview` | read | Build an invoice preview without a Stripe effect. |
+| `stripe.billing.subscription_renewal_preview` | read | Preview the next or recurring renewal through Stripe's provider preview endpoint. |
 | `stripe.billing.payment_status_summary` | read | Summarize invoice payment status and overdue exposure. |
 | `stripe.billing.customer_create` | write_requires_approval | Create a Stripe customer. |
 | `stripe.billing.invoice_create` | write_requires_approval | Create a draft invoice with line items. |
@@ -104,6 +125,39 @@ Every command requires a Station receipt. `read` commands have no Stripe side ef
 | `stripe.billing.dunning_message_draft` | Draft a privacy-minimized payment reminder. |
 
 The 13 entries marked `write_requires_approval` are the complete approval-controlled write set. No AI command can approve, send, refund, void, cancel, or otherwise mutate Stripe state.
+
+## v1.5.0 billing decision support
+
+### `stripe.billing.account_preflight`
+
+This is one bounded read for deciding whether a customer is ready to enter financial planning. It reads the customer, bounded invoice, subscription, and requested payment-method collections, then returns aggregate evidence:
+
+- `billing_state`: `ready`, `attention_required`, `not_ready`, or `unknown`;
+- invoice exposure, including open, overdue, partial, and uncollectible aggregates by currency;
+- active subscription count and status counts;
+- provider customer balance and its provider currency when supplied;
+- attached payment-method counts and `has_usable_method`;
+- per-source and overall `completeness`, `unknown_reasons`, and UTC `as_of`.
+
+`has_usable_method` means only that Stripe returned an attached method of a requested type. It does not mean that a future authorization is guaranteed. If any bounded provider source is incomplete or truncated, the overall state remains `unknown` rather than becoming a false `ready` or `not_ready` result.
+
+The projection does not return raw invoice rows, payment-method IDs or details, email, hosted URLs, or other unnecessary PII. It is decision-support evidence only: `approval_status` is not asserted by the module and `financial_authority` is false.
+
+### `stripe.billing.subscription_renewal_preview`
+
+This command uses Stripe's `POST /v1/invoices/create_preview` provider response. It never calculates a local amount from price, quantity, interval, discount, tax, or proration.
+
+- With `subscription_id`, the handler uses that subscription explicitly (`selection: explicit_subscription`).
+- With only `customer_id`, it performs a bounded subscription lookup. Exactly one eligible subscription (`active`, `trialing`, `past_due`, or `unpaid`) is used as the explicit preview source (`selection: resolved_single_subscription`).
+- Zero eligible subscriptions returns `no_previewable_subscription`; multiple eligible subscriptions returns `ambiguous_subscription`; neither is selected arbitrarily.
+- A truncated, incomplete, malformed, or refused subscription lookup fails closed with bounded unknown semantics.
+- `amount_due_cents`, `currency`, `period_start`, `period_end`, `next_payment_due`, discount/tax indicators, proration state, and line completeness are reported only from provider evidence. Missing or incomplete provider fields remain unknown.
+
+The resolved subscription ID is used internally and is not returned as a public output field. Renewal previews can change before a later invoice is created; a preview is read-only decision support, not a financial effect.
+
+### Live provider finding
+
+During Stripe TEST verification, the customer-only form was rejected because `create_preview` requires an explicit preview source. The implementation now resolves a single eligible subscription deterministically before calling the provider endpoint, with no deprecated-endpoint or local-estimate fallback.
 
 ## Incremental invoice history
 
@@ -151,11 +205,22 @@ The module requests only the capabilities needed for its providers:
 }
 ```
 
+## Testing and proof
+
+The current v1.5.0 regression result is **50/50 PASS**. The proof set covers command registration and schema checks, existing read/write safeguards, incremental invoice history, dunning and advisory fail-closed behavior, Stripe TEST verification for `account_preflight`, the corrected provider-backed renewal preview, and module signature verification. Stripe TEST evidence is not production-money verification.
+
 ## Known limitations
 
 - Provider success should be claimed only when an actual provider receipt or effect supports it. Stripe verification was performed against a TEST account, not a production account.
 - AI commands require a configured governed provider and fail closed when that path is unavailable.
+- An attached payment method does not guarantee a successful future authorization.
+- Bounded preflight returns `unknown` when an invoice, subscription, or payment-method source is incomplete or truncated.
+- A renewal preview can change before the actual invoice is created.
+- Multiple eligible subscriptions are reported as ambiguous; the handler does not choose one arbitrarily.
+- Provider/API refusal is not replaced with a local financial estimate.
+- Customer balance currency is left unknown when Stripe does not provide an authoritative currency.
 - Stripe usage aggregation is asynchronous; `usage_summary_list` can lag after usage is recorded.
+- `subscription_renewal_preview` reports provider preview evidence only; it does not create or send an invoice.
 - `credit_note_create` is for open/finalized invoice cases supported by the provider; paid invoices should use `refund_create`.
 - `invoice_void` applies to open/finalized invoices; drafts should be edited and paid invoices refunded.
 - `price_create` requires an interval when `meter_id` is supplied.
