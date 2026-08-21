@@ -1,4 +1,4 @@
-# dave/stripe-invoicing v1.6.0
+# dave/stripe-invoicing v1.6.1
 
 Governed Stripe billing operations for RailCall Station. The module helps an
 operator inspect billing state, prepare or execute approval-controlled billing
@@ -24,7 +24,7 @@ provider state, or post-effect certainty is insufficient.
 
 ## Install and Configure
 
-Install `dave/stripe-invoicing` v1.6.0 through the normal Station module
+Install `dave/stripe-invoicing` v1.6.1 through the normal Station module
 loader. Configure a Stripe credential with the canonical field:
 
 ```text
@@ -71,7 +71,7 @@ workflow, receipt, log, screenshot, or documentation.
 
 ## Quick start
 
-1. Install the module at v1.6.0.
+1. Install the module at v1.6.1.
 2. Configure a fresh `STRIPE_SECRET_KEY` through Station Configure.
 3. Use a read or `invoice_preview` command to inspect the intended result.
 4. Review the receipt and Airlock payload before approving any write.
@@ -89,13 +89,13 @@ TEST evidence is not production verification. Provider lag can affect usage
 summaries. Bounded reads report unknown or incomplete state instead of
 guessing. AI output is structured decision support only. A legacy plain
 `stripe` credential requires explicit migration. The current public Module
-video is [available on YouTube](https://youtu.be/WSC9mgYl270); the video does
+video is [available on YouTube](https://youtu.be/luhg76zC0n4); the video does
 not claim production-money success or marketplace publication.
 
 ## Evidence index
 
 - Current test report and exact verification scope: [TESTING.md](TESTING.md).
 - Exhaustive command reference: [COMMANDS.md](COMMANDS.md).
-- Public Module video: https://youtu.be/WSC9mgYl270.
+- Public Module video: https://youtu.be/luhg76zC0n4.
 - Homepage: https://davelab10.github.io/portofolio/.
 - Tests: https://github.com/davelab10/railcall-stripe-invoicing/blob/main/TESTING.md.

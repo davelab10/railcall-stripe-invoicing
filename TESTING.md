@@ -1,12 +1,12 @@
-# Module testing and evidence — v1.6.0
+# Module testing and evidence — v1.6.1
 
 This document records the local Step 3 regression baseline for
-`dave/stripe-invoicing` v1.6.0. It is an evidence boundary, not a claim of
+`dave/stripe-invoicing` v1.6.1. It is an evidence boundary, not a claim of
 production-money success.
 
 ## Baseline
 
-- Manifest: v1.6.0, 34 commands, 21 read, 13 approval-controlled writes.
+- Manifest: v1.6.1, 34 commands, 21 read, 13 approval-controlled writes.
 - Regression target: 56 tests, 42 subtests, 0 failures, 0 errors, 0 skips, and
   0 warnings when run in the restored project environment.
 - The release signature must verify against the signed module package; this
@@ -54,7 +54,7 @@ mutation is performed. Local tests do not prove account-specific permissions,
 provider uptime, payment success, or marketplace publication. Usage aggregation
 may lag provider data. The current public Module video is evidence of the
 documented product surface, not proof of production-money execution:
-https://youtu.be/WSC9mgYl270.
+https://youtu.be/luhg76zC0n4.
 
 ## Public evidence locations
 
