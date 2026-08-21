@@ -1,4 +1,4 @@
-# Command reference — dave/stripe-invoicing v1.6.0
+# Command reference — dave/stripe-invoicing v1.6.1
 
 This index keeps all 34 buyer-facing command IDs
 explicit. Every command requires a signed receipt. `read` has no declared
